@@ -46,7 +46,8 @@ python -m pytest
 - NYSE session-aware freshness and missing-session validation
 - Research-only indicators package with WMA, HMA, RSI, and a transparent QQE-style implementation
 - Saved backtests with persisted benchmark curves and research outputs
-- SPY Trading Workbench for a simplified SPY-only workflow
+- SPY Workbench for a simplified SPY-only workflow
+- Simplified four-tab navigation for the core SPY workflow
 - Strategy Qualification workflow for apples-to-apples strategy comparison
 - Stock Signal Scanner for daily signal triage across predefined universes
 - Saved scanner snapshots for historical signal review
@@ -78,7 +79,7 @@ python -m pytest
 The app is organized into these tabs:
 
 - Run Backtest
-- SPY Trading Workbench
+- SPY Workbench
 - Saved Backtests
 - Compare Backtests
 - Signal Scanner
@@ -169,9 +170,9 @@ These modules are research-only. They do not depend on Streamlit, broker code, o
   - red-flag count
   - options-overlay readiness
 
-## SPY Trading Workbench
+## SPY Workbench
 
-- `SPY Trading Workbench` is the simplified recommended workflow in the app.
+- `SPY Workbench` is the simplified recommended workflow in the app.
 - It is fixed to `SPY`.
 - It always compares the selected strategy against buy-and-hold `SPY`.
 - It is designed to reduce complexity and reduce overfitting pressure from too many symbols and universes.
@@ -179,6 +180,31 @@ These modules are research-only. They do not depend on Streamlit, broker code, o
 - It can promote one selected SPY strategy into forward paper trading.
 - It does not place real trades and it does not connect to a broker.
 - It should be used for forward paper validation before real money is ever considered.
+
+## Simplified Navigation
+
+- The app now uses four main tabs:
+  - `SPY Workbench`
+  - `Forward Paper`
+  - `Research History`
+  - `Data & Settings`
+- `SPY Workbench` is the recommended starting point.
+- `Forward Paper` is for the promoted SPY strategy only.
+- `Research History` is for reviewing prior searches, backtests, sweeps, and qualification results.
+- `Data & Settings` is for refresh, cache status, diagnostics, and database export.
+- Advanced and legacy workflows are still available, but they now live inside expanders instead of the top-level navigation.
+
+## Advanced Mode
+
+- The sidebar includes `Show Advanced Tools`.
+- Default: `off`
+- When advanced mode is off:
+  - the app stays focused on the SPY workflow
+  - broad legacy research controls stay hidden
+  - the main tabs emphasize search, promotion, and forward review
+- When advanced mode is on:
+  - additional research tools appear inside expanders
+  - legacy multi-ticker research, scanner history, parameter sweep, train/test, walk-forward, and manual paper journal remain accessible
 
 ## Automated SPY Strategy Search
 
@@ -496,6 +522,18 @@ Suggested first test:
 8. Promote one configuration to forward paper trading.
 9. Run forward paper updates as new daily data arrives.
 10. Review forward results before considering real money.
+
+## Recommended Daily Workflow
+
+1. Open `SPY Workbench`.
+2. Run `Automated SPY Search`.
+3. Review ranked candidates.
+4. Promote one candidate to forward paper.
+5. Open `Forward Paper`.
+6. Run `Forward Paper Update` after new daily data exists.
+7. Review forward results.
+8. Use `Research History` only when reviewing prior experiments.
+9. Use `Data & Settings` for refresh and diagnostics.
 
 ## Active Paper Strategies
 

@@ -100,6 +100,17 @@ SESSION_SPY_LAB_STABILITY_KEY = "ptl_spy_lab_stability"
 SESSION_SPY_LAB_ROBUSTNESS_KEY = "ptl_spy_lab_robustness"
 SESSION_SPY_LAB_EXIT_KEY = "ptl_spy_lab_exit_comparison"
 SESSION_SPY_SEARCH_KEY = "ptl_spy_search_state"
+PRIMARY_TAB_LABELS = ["SPY Workbench", "Forward Paper", "Research History", "Data & Settings"]
+
+
+def default_show_advanced_tools() -> bool:
+    """Advanced mode stays off by default so the app opens in the simplified SPY workflow."""
+    return False
+
+
+def get_primary_tab_labels() -> list[str]:
+    """Return the simplified top-level navigation labels."""
+    return list(PRIMARY_TAB_LABELS)
 
 
 def load_settings() -> dict[str, Any]:
@@ -2015,8 +2026,8 @@ def render_spy_strategy_lab(
     end_date: str,
     refresh_data: bool,
 ) -> None:
-    st.header("SPY Trading Workbench")
-    st.caption("Recommended focused workflow: choose one SPY entry strategy, choose an exit structure, compare it to buy-and-hold SPY, review robustness, and forward paper trade only the most credible setup.")
+    st.header("SPY Workbench")
+    st.caption("Start here. Run automated SPY search, review ranked candidates, then promote only one strategy to forward paper trading.")
 
     st.subheader("A. Strategy Setup")
     st.info("This workbench is fixed to SPY. It is the recommended primary workflow for the app.")
@@ -2105,7 +2116,7 @@ def render_spy_strategy_lab(
         commission_per_trade=float(workbench_commission),
     )
 
-    st.subheader("Automated SPY Search")
+    st.subheader("A. Automated SPY Search")
     st.caption("Run the approved SPY strategy-and-exit grid automatically, rank the candidates, then promote one exact configuration into forward paper trading.")
     approved_entry_count = len(generate_approved_spy_entry_presets())
     approved_exit_count = len(generate_approved_spy_exit_presets())
@@ -2201,7 +2212,7 @@ def render_spy_strategy_lab(
 
     search_state = st.session_state.get(SESSION_SPY_SEARCH_KEY)
     if search_state and search_state.get("results") is not None:
-        st.subheader("Automated SPY Search Results")
+        st.subheader("B. Ranked Candidates")
         results = search_state["results"]
         payload = search_state["payload"]
         highlights = search_state["highlights"]
@@ -2289,6 +2300,19 @@ def render_spy_strategy_lab(
                 key="spy_search_promote_choice",
             )
             selected_result = filtered_results.loc[filtered_results["result_id"] == result_choice].iloc[0]
+            st.subheader("C. Candidate Detail")
+            st.json(
+                {
+                    "entry_strategy": selected_result["entry_preset_label"],
+                    "entry_parameters": selected_result["entry_parameters_json"],
+                    "exit_structure": selected_result["exit_preset_label"],
+                    "exit_parameters": selected_result["exit_parameters_json"],
+                    "candidate_label": selected_result["candidate_label"],
+                    "robustness_score": int(selected_result["robustness_score"]),
+                    "red_flag_count": int(selected_result["red_flag_count"]),
+                },
+                expanded=False,
+            )
             st.caption(str(selected_result["summary_comment"]))
             search_promote_notes = st.text_area("Promotion notes for selected search result", value="", key="spy_search_promote_notes")
             search_promote_tags = st.text_input("Promotion tags for selected search result", value="spy-only,automated-search,promoted", key="spy_search_promote_tags")
@@ -2300,7 +2324,7 @@ def render_spy_strategy_lab(
                     promote_payload = build_active_paper_strategy_payload(
                         strategy_name=str(selected_result["entry_strategy_name"]),
                         strategy_parameters={**selected_result["entry_parameters_json"], "__workbench_exit_structure__": str(selected_result["exit_structure_key"])},
-                        universe_name="SPY Trading Workbench Automated Search",
+                        universe_name="SPY Workbench Automated Search",
                         tickers=["SPY"],
                         benchmark_symbol="SPY",
                         price_mode=workbench.price_mode,
@@ -2359,7 +2383,7 @@ def render_spy_strategy_lab(
         open_positions=open_positions,
     )
 
-    st.subheader("F. Forward Paper Status")
+    st.subheader("SPY Daily Signal Panel")
     signal_cols = st.columns(4)
     signal_cols[0].metric("Latest Signal", str(signal_panel["current_signal"]))
     signal_cols[1].metric("Position State", str(signal_panel["position_state"]))
@@ -2420,7 +2444,7 @@ def render_spy_strategy_lab(
         benchmark_sharpe = calculate_sharpe_ratio(benchmark_equity)
     summary = spy_strategy_summary(result.metrics, benchmark_sharpe=benchmark_sharpe)
 
-    st.subheader("B. Backtest Results")
+    st.subheader("D. Backtest Results")
     summary_cols = st.columns(4)
     summary_cols[0].metric("Strategy CAGR", f"{float(summary['Strategy CAGR']):.1%}")
     summary_cols[1].metric("SPY CAGR", f"{float(summary['Buy-and-Hold SPY CAGR']):.1%}")
@@ -2432,7 +2456,7 @@ def render_spy_strategy_lab(
     st.plotly_chart(build_drawdown_chart(result.equity_curve), use_container_width=True)
     st.dataframe(result.trade_log, use_container_width=True)
 
-    st.subheader("C. Exit Comparison")
+    st.subheader("E. Exit Comparison")
     exit_compare_choices = st.multiselect(
         "Exit structures to compare",
         [item.label for item in exit_structures],
@@ -2455,7 +2479,7 @@ def render_spy_strategy_lab(
         for line in summarize_exit_comparison_results(exit_results):
             st.write(f"- {line}")
 
-    st.subheader("D. Robustness Review")
+    st.subheader("F. Robustness Summary")
     if st.button("Run Robustness Review", key="spy_workbench_robustness"):
         sweep_engine = BacktestEngine(database=None)
         _, sweep_results, stability_summary = run_spy_parameter_stability(
@@ -2500,8 +2524,8 @@ def render_spy_strategy_lab(
             st.dataframe(robustness_payload["slippage_results"], use_container_width=True)
         render_warning_list(robustness_payload["slippage_warnings"] + state["validation_warnings"] + state["research"]["corporate_action_warnings"], "No robustness warnings were generated.")
 
-    st.subheader("E. Forward Paper Promotion")
-    st.caption("Freeze the current SPY entry-plus-exit configuration only after reviewing the comparison, drawdown, trade count, and robustness checks.")
+    st.subheader("G. Promote Candidate")
+    st.caption("Promote only one strategy at a time. Freeze the current SPY entry-plus-exit configuration only after reviewing the comparison, drawdown, trade count, and robustness checks.")
     promote_notes = st.text_area("Promotion notes", value="", key="spy_workbench_promote_notes")
     promote_tags = st.text_input("Promotion tags", value="spy-only,spy-trading-workbench", key="spy_workbench_promote_tags")
     promotion_checks = pd.DataFrame(
@@ -2515,7 +2539,7 @@ def render_spy_strategy_lab(
         ]
     )
     st.dataframe(promotion_checks, use_container_width=True, hide_index=True)
-    promote_confirm = st.checkbox("Freeze this SPY Trading Workbench configuration for forward paper trading.", key="spy_workbench_promote_confirm")
+    promote_confirm = st.checkbox("Freeze this SPY Workbench configuration for forward paper trading.", key="spy_workbench_promote_confirm")
     if st.button("Promote To SPY Forward Paper Trading", key="spy_workbench_promote_button"):
         if not promote_confirm:
             st.error("Confirm the promotion checkbox before activating forward paper trading.")
@@ -2523,7 +2547,7 @@ def render_spy_strategy_lab(
             payload = build_active_paper_strategy_payload(
                 strategy_name=current_workbench.entry_label,
                 strategy_parameters={**current_workbench.entry_parameters, "__workbench_exit_structure__": current_workbench.exit_structure_key},
-                universe_name="SPY Trading Workbench",
+                universe_name="SPY Workbench",
                 tickers=["SPY"],
                 benchmark_symbol="SPY",
                 price_mode=current_workbench.price_mode,
@@ -2535,7 +2559,7 @@ def render_spy_strategy_lab(
                 slippage_pct=current_workbench.slippage_pct,
                 commission_per_trade=current_workbench.commission_per_trade,
                 linked_backtest_run_id=result.run_id,
-                activation_reason=f"Promoted from SPY Trading Workbench: {preset.label} with {current_workbench.exit_structure_label}.",
+                activation_reason=f"Promoted from SPY Workbench: {preset.label} with {current_workbench.exit_structure_label}.",
                 notes=promote_notes,
                 tags=promote_tags,
                 status="active",
@@ -2936,6 +2960,262 @@ def render_research_dashboard(db: TradingLabDatabase) -> None:
     st.download_button("Export research dashboard CSV", data=filtered.to_csv(index=False).encode("utf-8"), file_name="research_dashboard.csv", mime="text/csv")
 
 
+def render_saved_spy_searches(
+    db: TradingLabDatabase,
+    *,
+    strategy_filter: str = "All",
+    candidate_label_filter: str = "All",
+    promoted_only: bool = False,
+    tag_filter: str = "",
+) -> None:
+    """Render saved automated SPY search runs and their stored result rows."""
+    st.subheader("A. Saved SPY Searches")
+    search_runs = db.list_spy_strategy_search_runs(limit=100, tag=tag_filter or None)
+    if search_runs.empty:
+        st.info("No automated SPY search runs are saved yet.")
+        return
+    st.dataframe(search_runs, use_container_width=True)
+    selected_run_id = st.selectbox("Select saved SPY search run", search_runs["search_run_id"].tolist(), key="history_spy_search_run")
+    results = db.read_spy_strategy_search_results(str(selected_run_id))
+    if results.empty:
+        st.info("The selected SPY search run has no stored results.")
+        return
+    filtered = results.copy()
+    if strategy_filter != "All":
+        filtered = filtered[filtered["entry_strategy_name"] == strategy_filter]
+    if candidate_label_filter != "All":
+        filtered = filtered[filtered["candidate_label"] == candidate_label_filter]
+    if promoted_only:
+        filtered = filtered[filtered["promoted_active_strategy_id"].notna()]
+    st.dataframe(filtered, use_container_width=True)
+    st.download_button(
+        "Export saved SPY search CSV",
+        data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name=f"saved_spy_search_{selected_run_id}.csv",
+        mime="text/csv",
+        key="history_export_spy_search",
+    )
+
+
+def render_forward_paper_workspace(
+    *,
+    db: TradingLabDatabase,
+    provider: YFinanceDataProvider,
+    benchmark_symbol: str,
+    refresh_data: bool,
+    base_config: BacktestConfig,
+    default_tickers: list[str],
+    current_strategy_name: str,
+    current_strategy_params: dict[str, Any],
+    show_advanced_tools: bool,
+) -> None:
+    """Render the simplified forward-paper workspace, with legacy controls hidden behind expanders."""
+    st.header("Forward Paper")
+    st.caption("Forward paper trading uses future data only as it becomes available. Promote only one SPY strategy at a time.")
+    active_strategies = db.list_active_paper_strategies()
+    active_spy = active_strategies[active_strategies["tickers"].fillna("").eq("SPY")] if not active_strategies.empty else pd.DataFrame()
+    if active_spy.empty:
+        st.info("No promoted SPY forward-paper strategy is active yet. Start in SPY Workbench, review candidates, and promote one strategy.")
+    else:
+        selected_active_id = st.selectbox("Active SPY strategy", active_spy["active_strategy_id"].tolist(), key="workspace_forward_active_id")
+        selected_active = db.get_active_paper_strategy(str(selected_active_id))
+        if selected_active is not None:
+            summary_cols = st.columns(5)
+            summary_cols[0].metric("Status", str(selected_active.get("status", "")))
+            summary_cols[1].metric("Activation Date", str(pd.Timestamp(selected_active["created_at"]).date()))
+            summary_cols[2].metric("Current Paper Equity", f"{float(selected_active.get('current_paper_equity', 0.0) or 0.0):,.2f}")
+            summary_cols[3].metric("Ticker", str(selected_active.get("tickers", "")))
+            summary_cols[4].metric("Benchmark", str(selected_active.get("benchmark_symbol", "")))
+            if st.button("Run Forward Paper Update", key="workspace_forward_update", type="primary"):
+                engine = ForwardPaperEngine()
+                updated: list[str] = []
+                for strategy_row in active_spy.itertuples():
+                    if str(strategy_row.status) != "active":
+                        continue
+                    strategy_payload = db.get_active_paper_strategy(str(strategy_row.active_strategy_id))
+                    if strategy_payload is None:
+                        continue
+                    result = engine.run_update(active_strategy=strategy_payload, provider=provider)
+                    db.replace_forward_engine_events(result.active_strategy_id, result.events)
+                    if not result.skipped:
+                        db.replace_forward_paper_state(result.active_strategy_id, result.orders, result.positions, result.trades, result.equity_curve)
+                        strategy_payload["current_paper_equity"] = result.current_equity
+                        strategy_payload["updated_at"] = datetime.now(UTC).replace(tzinfo=None)
+                        db.update_active_paper_strategy(strategy_payload)
+                    updated.append(result.active_strategy_id)
+                st.success(f"Forward paper update completed for {len(updated)} SPY strategy record(s).")
+
+            orders = db.read_forward_paper_orders(str(selected_active_id))
+            positions = db.read_forward_paper_positions(str(selected_active_id))
+            trades = db.read_forward_paper_trades(str(selected_active_id))
+            equity_curve = db.read_forward_paper_equity_curve(str(selected_active_id))
+            events = db.read_active_paper_strategy_events(str(selected_active_id))
+
+            st.subheader("A. Active SPY Strategy")
+            st.json(selected_active, expanded=False)
+            st.subheader("B. Pending Orders")
+            if orders.empty:
+                st.info("No pending forward-paper orders.")
+            else:
+                st.dataframe(orders[orders["status"] == "pending"], use_container_width=True)
+            st.subheader("C. Open Positions")
+            if positions.empty:
+                st.info("No open forward-paper positions.")
+            else:
+                st.dataframe(positions[positions["status"] == "open"], use_container_width=True)
+            st.subheader("D. Closed Trades")
+            if trades.empty:
+                st.info("No closed forward-paper trades yet.")
+            else:
+                st.dataframe(trades, use_container_width=True)
+            st.subheader("E. Forward Equity Curve")
+            if equity_curve.empty:
+                st.info("Run a forward update after new daily data exists to build the forward equity curve.")
+            else:
+                st.plotly_chart(build_equity_chart(equity_curve, pd.DataFrame()), use_container_width=True)
+                st.plotly_chart(build_drawdown_chart(equity_curve), use_container_width=True)
+            st.subheader("F. Event Log")
+            if events.empty:
+                st.info("No forward-paper events were recorded yet.")
+            else:
+                st.dataframe(events.tail(50), use_container_width=True)
+            st.subheader("G. Forward vs Backtest Validation")
+            if selected_active.get("linked_backtest_run_id") and not equity_curve.empty:
+                metric_trades = trades.rename(columns={"realized_pnl": "pnl", "realized_return_pct": "return_pct"}).copy() if not trades.empty else pd.DataFrame(columns=["pnl", "return_pct", "entry_date", "exit_date"])
+                if not metric_trades.empty:
+                    metric_trades["holding_days"] = (pd.to_datetime(metric_trades["exit_date"]) - pd.to_datetime(metric_trades["entry_date"])).dt.days.clip(lower=0)
+                forward_metrics = compute_summary_metrics(equity_curve, metric_trades, float(selected_active.get("initial_capital", 0.0) or 0.0))
+                linked_backtest_run = db.get_backtest_run(str(selected_active["linked_backtest_run_id"]))
+                warnings = compare_forward_to_backtest(
+                    backtest_run=linked_backtest_run,
+                    forward_metrics=forward_metrics,
+                    days_since_activation=int((pd.Timestamp.today().normalize() - pd.Timestamp(selected_active["created_at"]).normalize()).days),
+                )
+                render_warning_list(warnings, "No forward-versus-backtest warnings were generated.")
+            else:
+                st.info("Forward validation will appear once the promoted strategy has linked backtest context and forward equity history.")
+    if show_advanced_tools:
+        with st.expander("Advanced Daily Dashboard", expanded=False):
+            render_daily_trading_dashboard(db)
+        with st.expander("H. Manual Paper Journal", expanded=False):
+            render_paper_trade_journal(db)
+        with st.expander("Advanced Forward Paper Tools", expanded=False):
+            render_forward_paper_trading(
+                db=db,
+                provider=provider,
+                benchmark_symbol=benchmark_symbol,
+                refresh_data=refresh_data,
+                base_config=base_config,
+                default_tickers=default_tickers,
+                current_strategy_name=current_strategy_name,
+                current_strategy_params=current_strategy_params,
+            )
+
+
+def render_research_history_workspace(
+    *,
+    db: TradingLabDatabase,
+    current_meta: dict[str, Any],
+    current_data: dict[str, pd.DataFrame],
+    current_research: dict[str, Any] | None,
+    show_advanced_tools: bool,
+) -> None:
+    """Render saved research and historical review tools under one tab."""
+    st.header("Research History")
+    st.caption("Use this tab to review prior work. Start new SPY experiments in SPY Workbench.")
+    filter_cols = st.columns(5)
+    strategy_filter = filter_cols[0].selectbox("Strategy", ["All", "SPY 200-Day Trend Filter", "Moving Average Crossover", "RSI Mean Reversion", "Daily Breakout", "QQE/HMA Daily"], key="history_strategy_filter")
+    candidate_label_filter = filter_cols[1].selectbox("Candidate label", ["All", "Strong candidate", "Possible candidate", "Not ready", "Reject"], key="history_candidate_filter")
+    promoted_only = filter_cols[2].checkbox("Promoted only", value=False, key="history_promoted_only")
+    tag_filter = filter_cols[3].text_input("Tag contains", value="", key="history_tag_filter")
+    filter_cols[4].write("Review candidates and saved runs here. New experiments should start in SPY Workbench.")
+
+    render_saved_spy_searches(
+        db,
+        strategy_filter=strategy_filter,
+        candidate_label_filter=candidate_label_filter,
+        promoted_only=promoted_only,
+        tag_filter=tag_filter,
+    )
+    st.subheader("B. Saved SPY Sessions")
+    st.info("Dedicated SPY session objects are not persisted yet. Use saved SPY searches, saved backtests, and active forward-paper strategies as the current session trail.")
+    with st.expander("C. Saved Backtests", expanded=False):
+        render_saved_backtests(db)
+    with st.expander("D. Saved Sweeps", expanded=False):
+        render_saved_sweeps(db)
+    with st.expander("E. Strategy Qualification Results", expanded=False):
+        render_saved_qualification_runs(db)
+    with st.expander("F. Walk-Forward Results", expanded=False):
+        st.info("Walk-forward summaries are attached to saved runs. Open a saved backtest to inspect linked walk-forward results.")
+    with st.expander("G. Train/Test Results", expanded=False):
+        st.info("Train/test summaries are attached to saved runs. Open a saved backtest to inspect linked train/test degradation.")
+    with st.expander("H. Exports", expanded=False):
+        runs = db.list_backtest_runs(limit=500)
+        if runs.empty:
+            st.info("No saved backtests are available to export yet.")
+        else:
+            st.download_button("Export saved backtests CSV", data=runs.to_csv(index=False).encode("utf-8"), file_name="saved_backtests.csv", mime="text/csv", key="history_export_backtests")
+    if show_advanced_tools:
+        with st.expander("Advanced Research Dashboard", expanded=False):
+            render_research_dashboard(db)
+        with st.expander("Advanced Compare Backtests", expanded=False):
+            render_compare_backtests(db)
+        with st.expander("Advanced Scanner History", expanded=False):
+            render_scanner_history(db)
+        with st.expander("Legacy Multi-Ticker Research", expanded=False):
+            render_parameter_sweep(current_meta, current_data)
+            render_train_test_section(current_meta, current_data)
+            render_walk_forward_section(current_meta, current_data)
+            render_regime_section(current_research, current_meta)
+
+
+def render_data_settings_workspace(
+    *,
+    db: TradingLabDatabase,
+    provider: YFinanceDataProvider,
+    statuses: list[CacheStatus],
+    warnings: list[str],
+    current_research: dict[str, Any] | None,
+    start_date: str,
+    end_date: str,
+    refresh_data: bool,
+    settings_snapshot: dict[str, Any],
+    show_advanced_tools: bool,
+) -> None:
+    """Render data refresh, diagnostics, and app-level settings."""
+    st.header("Data & Settings")
+    st.caption("Refresh data, inspect cache health, and review diagnostics here.")
+    st.subheader("A. Data Refresh")
+    st.write("Start here if SPY data looks stale before rerunning search or forward paper updates.")
+    if st.button("Refresh SPY Daily Data", key="data_settings_refresh_spy"):
+        provider.get_stock_bars(symbol="SPY", start_date=start_date, end_date=end_date, timeframe="1d", force_refresh=True)
+        st.success("Requested a forced refresh for SPY daily bars.")
+    latest_status = provider.get_last_fetch_status("SPY")
+    freshness_rows = statuses[:] if statuses else ([latest_status] if latest_status is not None else [])
+    st.subheader("B. Cache Status")
+    render_freshness_status([status for status in freshness_rows if status is not None])
+    st.subheader("C. Data Quality Warnings")
+    render_warning_list(warnings, "No data-quality warnings are currently loaded in session.")
+    st.subheader("D. Benchmark Diagnostics")
+    render_benchmark_diagnostics(current_research["benchmark_diagnostics"] if current_research else None)
+    st.subheader("E. Corporate Action Warnings")
+    render_warning_list(current_research["corporate_action_warnings"] if current_research else [], "No corporate-action warnings are currently loaded in session.")
+    st.subheader("F. App Settings")
+    st.json(settings_snapshot, expanded=False)
+    st.subheader("G. Database Backup / Export")
+    st.write({"db_path": db.db_path})
+    db_path = Path(db.db_path)
+    if db_path.exists():
+        st.download_button("Backup Database", data=db_path.read_bytes(), file_name=db_path.name, mime="application/octet-stream", key="data_settings_backup_db")
+    else:
+        st.info("The DuckDB database file does not exist yet.")
+    if show_advanced_tools:
+        with st.expander("H. Developer Diagnostics", expanded=False):
+            st.write({"session_keys": sorted(st.session_state.keys())})
+            render_indicator_preview(provider)
+            render_data_health(statuses, warnings, current_research)
+
+
 def main() -> None:
     load_dotenv()
     settings = load_settings()
@@ -2956,47 +3236,66 @@ def main() -> None:
     )
 
     with st.sidebar:
-        st.header("Backtest Settings")
-        tickers = st.text_input("Tickers", value="AAPL,MSFT", help="Comma-separated stock tickers to test.")
-        benchmark_symbol = st.text_input("Benchmark Symbol", value=app_settings.get("benchmark_symbol", "SPY"), help="Used for relative metrics, walk-forward context, and regime analysis.").upper().strip()
+        st.header("Workflow")
+        st.caption("Start here in SPY Workbench. Review candidates, then promote only one strategy at a time.")
+        show_advanced_tools = st.checkbox("Show Advanced Tools", value=default_show_advanced_tools(), help="When off, the app stays focused on the simplified SPY workflow. When on, legacy research and diagnostics appear inside expanders.")
+        st.header("Shared Settings")
+        benchmark_symbol = "SPY"
+        tickers = "SPY"
         start_date = st.date_input("Start date", value=pd.Timestamp("2020-01-01"))
         end_date = st.date_input("End date", value=pd.Timestamp.today().normalize())
         initial_capital = st.number_input("Initial capital", min_value=1000.0, value=float(bt_settings.get("default_initial_capital", 100000)))
-        strategy_name = st.selectbox("Strategy", ["Moving Average Crossover", "RSI Mean Reversion", "Daily Breakout", "QQE/HMA Daily"])
-        strategy_params: dict[str, int | float] = {}
-        if strategy_name == "Moving Average Crossover":
-            strategy_params["fast_window"] = st.number_input("Fast window", min_value=2, value=20)
-            strategy_params["slow_window"] = st.number_input("Slow window", min_value=3, value=50)
-        elif strategy_name == "RSI Mean Reversion":
-            strategy_params["rsi_length"] = st.number_input("RSI length", min_value=2, value=14)
-            strategy_params["buy_threshold"] = st.number_input("Buy threshold", min_value=1.0, max_value=50.0, value=30.0)
-            strategy_params["sell_threshold"] = st.number_input("Sell threshold", min_value=50.0, max_value=100.0, value=55.0)
-            strategy_params["max_holding_days"] = st.number_input("Max holding days", min_value=1, value=10)
-        elif strategy_name == "Daily Breakout":
-            strategy_params["lookback_window"] = st.number_input("Lookback window", min_value=2, value=20)
-        else:
-            strategy_params["hma_length"] = st.number_input("HMA length", min_value=2, value=21)
-            strategy_params["rsi_length"] = st.number_input("QQE RSI length", min_value=2, value=14)
-            strategy_params["rsi_smoothing"] = st.number_input("QQE RSI smoothing", min_value=1, value=5)
-            strategy_params["qqe_factor"] = st.number_input("QQE factor", min_value=0.1, value=4.236, step=0.1)
-            strategy_params["atr_smoothing"] = st.number_input("QQE ATR smoothing", min_value=1, value=5)
-            strategy_params["require_hma_slope"] = st.checkbox("Require HMA slope to be positive", value=True)
-            strategy_params["exit_on_hma_break"] = st.checkbox("Exit on HMA break", value=True)
-            strategy_params["exit_on_qqe_bearish"] = st.checkbox("Exit on QQE bearish turn", value=True)
-        slippage_pct = st.number_input("Slippage %", min_value=0.0, value=float(bt_settings.get("default_slippage_pct", 0.0005)), format="%.5f", help="Used for simple slippage sensitivity in fills.")
+        slippage_pct = st.number_input("Slippage %", min_value=0.0, value=float(bt_settings.get("default_slippage_pct", 0.0005)), format="%.5f", help="Shared default used by SPY Workbench and forward paper promotion.")
         commission_per_trade = st.number_input("Commission per trade", min_value=0.0, value=float(bt_settings.get("default_commission_per_trade", 1.0)))
-        sizing_method = st.selectbox("Position sizing method", ["fixed_dollar", "percent_of_portfolio"])
-        position_size_value = st.number_input("Position size value", min_value=0.0, value=float(bt_settings.get("default_position_size_value", 0.1)))
-        max_positions = st.number_input("Max positions", min_value=1, value=int(bt_settings.get("default_max_positions", 5)))
-        stop_loss_pct = st.number_input("Stop loss %", min_value=0.0, value=0.08, format="%.4f")
-        take_profit_pct = st.number_input("Take profit %", min_value=0.0, value=0.15, format="%.4f")
-        trailing_stop_pct = st.number_input("Trailing stop %", min_value=0.0, value=0.0, format="%.4f")
         price_mode = st.selectbox("Price mode", ["raw_price_mode", "adjusted_price_mode"], help="Adjusted mode uses adjusted closes where available. Raw mode is more exposed to split and dividend distortions.")
-        return_mode = st.selectbox("Dividend mode", ["price_return_only", "total_return_with_dividends"], help="Dividend cash is only added in raw-price mode to avoid double-counting adjusted series.")
-        research_notes = st.text_area("Run notes", value="", help="Optional notes to save with this backtest run.")
-        research_tags = st.text_input("Run tags", value="", help="Comma-separated tags such as momentum, overfit-risk, options-candidate.")
         refresh_data = st.checkbox("Refresh data", value=bool(data_settings.get("force_refresh_default", False)))
-        run_backtest = st.button("Run backtest", type="primary")
+        sizing_method = "percent_of_portfolio"
+        position_size_value = float(bt_settings.get("default_position_size_value", 0.1))
+        max_positions = 1
+        stop_loss_pct = 0.08
+        take_profit_pct = 0.15
+        trailing_stop_pct = 0.0
+        return_mode = "price_return_only"
+        research_notes = ""
+        research_tags = ""
+        strategy_name = "Moving Average Crossover"
+        strategy_params: dict[str, int | float] = default_strategy_params(strategy_name)
+        run_backtest = False
+        if show_advanced_tools:
+            with st.expander("Advanced Research Controls", expanded=False):
+                tickers = st.text_input("Tickers", value="AAPL,MSFT", help="Legacy multi-ticker backtest control. SPY Workbench remains fixed to SPY.")
+                benchmark_symbol = st.text_input("Benchmark Symbol", value=app_settings.get("benchmark_symbol", "SPY"), help="Used by advanced research tools.").upper().strip()
+                strategy_name = st.selectbox("Strategy", ["Moving Average Crossover", "RSI Mean Reversion", "Daily Breakout", "QQE/HMA Daily"])
+                strategy_params = {}
+                if strategy_name == "Moving Average Crossover":
+                    strategy_params["fast_window"] = st.number_input("Fast window", min_value=2, value=20)
+                    strategy_params["slow_window"] = st.number_input("Slow window", min_value=3, value=50)
+                elif strategy_name == "RSI Mean Reversion":
+                    strategy_params["rsi_length"] = st.number_input("RSI length", min_value=2, value=14)
+                    strategy_params["buy_threshold"] = st.number_input("Buy threshold", min_value=1.0, max_value=50.0, value=30.0)
+                    strategy_params["sell_threshold"] = st.number_input("Sell threshold", min_value=50.0, max_value=100.0, value=55.0)
+                    strategy_params["max_holding_days"] = st.number_input("Max holding days", min_value=1, value=10)
+                elif strategy_name == "Daily Breakout":
+                    strategy_params["lookback_window"] = st.number_input("Lookback window", min_value=2, value=20)
+                else:
+                    strategy_params["hma_length"] = st.number_input("HMA length", min_value=2, value=21)
+                    strategy_params["rsi_length"] = st.number_input("QQE RSI length", min_value=2, value=14)
+                    strategy_params["rsi_smoothing"] = st.number_input("QQE RSI smoothing", min_value=1, value=5)
+                    strategy_params["qqe_factor"] = st.number_input("QQE factor", min_value=0.1, value=4.236, step=0.1)
+                    strategy_params["atr_smoothing"] = st.number_input("QQE ATR smoothing", min_value=1, value=5)
+                    strategy_params["require_hma_slope"] = st.checkbox("Require HMA slope to be positive", value=True)
+                    strategy_params["exit_on_hma_break"] = st.checkbox("Exit on HMA break", value=True)
+                    strategy_params["exit_on_qqe_bearish"] = st.checkbox("Exit on QQE bearish turn", value=True)
+                sizing_method = st.selectbox("Position sizing method", ["fixed_dollar", "percent_of_portfolio"])
+                position_size_value = st.number_input("Position size value", min_value=0.0, value=float(bt_settings.get("default_position_size_value", 0.1)))
+                max_positions = st.number_input("Max positions", min_value=1, value=int(bt_settings.get("default_max_positions", 5)))
+                stop_loss_pct = st.number_input("Stop loss %", min_value=0.0, value=0.08, format="%.4f")
+                take_profit_pct = st.number_input("Take profit %", min_value=0.0, value=0.15, format="%.4f")
+                trailing_stop_pct = st.number_input("Trailing stop %", min_value=0.0, value=0.0, format="%.4f")
+                return_mode = st.selectbox("Dividend mode", ["price_return_only", "total_return_with_dividends"], help="Dividend cash is only added in raw-price mode to avoid double-counting adjusted series.")
+                research_notes = st.text_area("Run notes", value="", help="Optional notes to save with this backtest run.")
+                research_tags = st.text_input("Run tags", value="", help="Comma-separated tags such as momentum, overfit-risk, options-candidate.")
+                run_backtest = st.button("Run advanced backtest", type="primary")
 
     base_config = BacktestConfig(
         initial_capital=initial_capital,
@@ -3051,96 +3350,10 @@ def main() -> None:
     current_research = st.session_state.get(SESSION_RESEARCH_KEY)
     current_meta = st.session_state.get(SESSION_META_KEY, {})
 
-    tabs = st.tabs(
-        [
-            "Run Backtest",
-            "SPY Trading Workbench",
-            "Saved Backtests",
-            "Compare Backtests",
-            "Signal Scanner",
-            "Daily Trading Dashboard",
-            "Forward Paper Trading",
-            "Paper Journal",
-            "Scanner History",
-            "Strategy Qualification",
-            "Parameter Sweep",
-            "Train/Test",
-            "Walk-Forward",
-            "Regime Analysis",
-            "Indicators",
-            "Data Health",
-            "Research Dashboard",
-        ]
-    )
-    (
-        tab_run,
-        tab_spy_lab,
-        tab_saved,
-        tab_compare,
-        tab_scanner,
-        tab_daily,
-        tab_forward,
-        tab_paper,
-        tab_history,
-        tab_qualification,
-        tab_sweep,
-        tab_train_test,
-        tab_walk,
-        tab_regime,
-        tab_indicators,
-        tab_health,
-        tab_dashboard,
-    ) = tabs
+    tabs = st.tabs(get_primary_tab_labels())
+    tab_spy_workbench, tab_forward, tab_history, tab_data = tabs
 
-    with tab_run:
-        st.subheader("Run Summary")
-        st.write(
-            {
-                "benchmark_symbol": benchmark_symbol,
-                "cache_max_age_hours": data_settings.get("cache_max_age_hours", 24),
-                "force_refresh_default": data_settings.get("force_refresh_default", False),
-                "allow_stale_cache": data_settings.get("allow_stale_cache", False),
-            }
-        )
-        if current_result is None:
-            st.info("Configure the sidebar and run a backtest.")
-        else:
-            st.subheader("Metrics")
-            render_metrics(current_result.metrics, limit=16)
-            st.plotly_chart(build_equity_chart(current_result.equity_curve, current_result.benchmark_curve), use_container_width=True)
-            st.plotly_chart(build_drawdown_chart(current_result.equity_curve), use_container_width=True)
-            monthly_returns = monthly_returns_table(current_result.equity_curve)
-            if not monthly_returns.empty:
-                st.subheader("Monthly Returns")
-                st.dataframe(monthly_returns, use_container_width=True)
-            st.subheader("Robustness Score")
-            render_robustness(current_research["robustness"])
-            st.subheader("Options Overlay Candidate")
-            render_options_candidate(
-                build_options_candidate_assessment(
-                    db,
-                    current_result.run_id,
-                    current_result.metrics,
-                    current_research["concentration"],
-                    current_research["robustness"].score,
-                    str(current_meta.get("strategy_name") or ""),
-                )
-            )
-            st.subheader("Strategy Audit")
-            render_audit_findings(current_research["audit_findings"])
-            st.subheader("Profit Concentration")
-            render_concentration(current_research["concentration"])
-            st.subheader("Benchmark Diagnostics")
-            render_benchmark_diagnostics(current_research["benchmark_diagnostics"])
-            st.subheader("Corporate-Action Warning Summary")
-            render_warning_list(current_research["corporate_action_warnings"], "No corporate-action warnings were generated for this run.")
-            st.subheader("Recent Corporate Actions")
-            render_corporate_actions(db, current_meta.get("symbols", []))
-            st.subheader("Trade Log")
-            st.dataframe(current_result.trade_log, use_container_width=True)
-            st.download_button("Export trade log to CSV", data=current_result.trade_log.to_csv(index=False).encode("utf-8"), file_name="trade_log.csv", mime="text/csv")
-
-    with tab_spy_lab:
+    with tab_spy_workbench:
         render_spy_strategy_lab(
             db=db,
             provider=provider,
@@ -3149,23 +3362,29 @@ def main() -> None:
             end_date=str(end_date),
             refresh_data=refresh_data,
         )
-    with tab_saved:
-        render_saved_backtests(db)
-    with tab_compare:
-        render_compare_backtests(db)
-    with tab_scanner:
-        render_signal_scanner(
-            db=db,
-            provider=provider,
-            benchmark_symbol=benchmark_symbol,
-            refresh_data=refresh_data,
-            base_config=base_config,
-            default_tickers=normalize_ticker_list(tickers),
-        )
-    with tab_daily:
-        render_daily_trading_dashboard(db)
+        if show_advanced_tools:
+            with st.expander("Advanced Tools", expanded=False):
+                render_strategy_qualification(
+                    db=db,
+                    provider=provider,
+                    start_date=str(start_date),
+                    end_date=str(end_date),
+                    benchmark_symbol=benchmark_symbol,
+                    refresh_data=refresh_data,
+                    base_config=base_config,
+                    default_tickers=normalize_ticker_list(tickers),
+                )
+                render_signal_scanner(
+                    db=db,
+                    provider=provider,
+                    benchmark_symbol=benchmark_symbol,
+                    refresh_data=refresh_data,
+                    base_config=base_config,
+                    default_tickers=normalize_ticker_list(tickers),
+                )
+
     with tab_forward:
-        render_forward_paper_trading(
+        render_forward_paper_workspace(
             db=db,
             provider=provider,
             benchmark_symbol=benchmark_symbol,
@@ -3174,33 +3393,34 @@ def main() -> None:
             default_tickers=normalize_ticker_list(tickers),
             current_strategy_name=strategy_name,
             current_strategy_params=strategy_params,
+            show_advanced_tools=show_advanced_tools,
         )
-    with tab_paper:
-        render_paper_trade_journal(db)
+
     with tab_history:
-        render_scanner_history(db)
-    with tab_qualification:
-        render_strategy_qualification(
+        render_research_history_workspace(
+            db=db,
+            current_meta=current_meta,
+            current_data=current_data,
+            current_research=current_research,
+            show_advanced_tools=show_advanced_tools,
+        )
+
+    with tab_data:
+        render_data_settings_workspace(
             db=db,
             provider=provider,
+            statuses=current_statuses,
+            warnings=current_warnings,
+            current_research=current_research,
             start_date=str(start_date),
             end_date=str(end_date),
-            benchmark_symbol=benchmark_symbol,
             refresh_data=refresh_data,
-            base_config=base_config,
-            default_tickers=normalize_ticker_list(tickers),
+            settings_snapshot={
+                "benchmark_symbol": benchmark_symbol,
+                "cache_max_age_hours": data_settings.get("cache_max_age_hours", 24),
+                "force_refresh_default": data_settings.get("force_refresh_default", False),
+                "allow_stale_cache": data_settings.get("allow_stale_cache", False),
+                "show_advanced_tools": show_advanced_tools,
+            },
+            show_advanced_tools=show_advanced_tools,
         )
-    with tab_sweep:
-        render_parameter_sweep(current_meta, current_data)
-    with tab_train_test:
-        render_train_test_section(current_meta, current_data)
-    with tab_walk:
-        render_walk_forward_section(current_meta, current_data)
-    with tab_regime:
-        render_regime_section(current_research, current_meta)
-    with tab_indicators:
-        render_indicator_preview(provider)
-    with tab_health:
-        render_data_health(current_statuses, current_warnings, current_research)
-    with tab_dashboard:
-        render_research_dashboard(db)

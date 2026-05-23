@@ -371,7 +371,7 @@ def run_spy_parameter_stability(
         benchmark_symbol,
         sort_metric="CAGR",
         strategy_name=preset.strategy_name,
-        notes=f"SPY Trading Workbench preset: {preset.label}",
+        notes=f"SPY Workbench preset: {preset.label}",
         tags="spy-only,spy-strategy-lab",
         sweep_context={"preset_key": preset.key},
     )
