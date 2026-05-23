@@ -523,17 +523,44 @@ Suggested first test:
 9. Run forward paper updates as new daily data arrives.
 10. Review forward results before considering real money.
 
+## SPY Multi-Timeframe Mode
+
+- The `SPY Workbench` now supports:
+  - `Daily`
+  - `15-minute`
+  - `5-minute experimental`
+- `Daily` remains the long-history baseline.
+- `15-minute` is the preferred intraday mode for short-history research and forward validation.
+- `5-minute` is experimental and more noise-sensitive.
+- Intraday modes use a completed daily regime filter so intraday entries only reference prior completed daily information.
+- Intraday execution assumptions are conservative:
+  - signals form on completed bars
+  - entries fill no earlier than the next bar open
+  - no same-bar entry execution
+  - end-of-day exit can close intraday positions on the last regular-hours bar
+  - overnight holding is off by default for intraday strategies
+- Intraday results should be treated as forward-test infrastructure, not deep historical proof.
+
+## yfinance Intraday Limitation
+
+- `yfinance` intraday history is limited to roughly the most recent 60 days.
+- If you request a longer intraday range, the app clamps the request and warns in the UI.
+- Because of that limitation, intraday search results should not be compared directly to long-history daily results without context.
+
 ## Recommended Daily Workflow
 
 1. Open `SPY Workbench`.
-2. Run `Automated SPY Search`.
-3. Review ranked candidates.
-4. Promote one candidate to forward paper.
-5. Open `Forward Paper`.
-6. Run `Forward Paper Update` after new daily data exists.
-7. Review forward results.
-8. Use `Research History` only when reviewing prior experiments.
-9. Use `Data & Settings` for refresh and diagnostics.
+2. Use `Daily` mode to establish the baseline.
+3. Switch to `15-minute` mode and keep the daily 200-day regime filter enabled.
+4. Run the limited intraday SPY search.
+5. Review candidate quality cautiously.
+6. Promote only one intraday candidate to forward paper.
+7. Open `Forward Paper`.
+8. Run `Forward Paper Update` after new 15-minute data exists.
+9. Review forward results.
+10. Treat `5-minute` mode as experimental.
+11. Use `Research History` only when reviewing prior experiments.
+12. Use `Data & Settings` for refresh and diagnostics.
 
 ## Active Paper Strategies
 
@@ -550,7 +577,7 @@ Suggested first test:
 
 - Entry default: `next_open`
 - Optional entry mode: `next_close`
-- Exit handling uses daily-bar high/low checks for:
+- Exit handling uses bar high/low checks for:
   - stop loss
   - take profit
   - trailing stop

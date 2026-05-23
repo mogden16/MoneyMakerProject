@@ -14,8 +14,11 @@ from trading_lab.backtest.robustness import compute_robustness_score, parameter_
 from trading_lab.backtest.sweep import run_parameter_sweep
 from trading_lab.backtest.train_test import run_train_test_analysis, split_data_by_percentage
 from trading_lab.backtest.walk_forward import run_walk_forward_analysis
+from trading_lab.data.intraday import INTRADAY_MAX_HISTORY_DAYS, is_intraday_timeframe
 from trading_lab.signals.scanner import determine_signal_type
 from trading_lab.strategies.breakout import BreakoutStrategy
+from trading_lab.strategies.intraday_breakout import IntradayBreakoutStrategy
+from trading_lab.strategies.intraday_pullback import IntradayPullbackStrategy
 from trading_lab.strategies.moving_average import MovingAverageCrossStrategy
 from trading_lab.strategies.qqe_hma_strategy import QQEHMAStrategy
 from trading_lab.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
@@ -30,6 +33,7 @@ class SpyStrategyPreset:
     description: str
     parameters: dict[str, Any]
     parameter_grid: dict[str, list[int | float]]
+    timeframes: tuple[str, ...] = ("1d",)
     experimental: bool = False
 
 
@@ -47,6 +51,7 @@ class SpyWorkbenchConfig:
     preset_key: str
     entry_label: str
     entry_parameters: dict[str, Any]
+    timeframe: str
     exit_structure_key: str
     exit_structure_label: str
     exit_parameters: dict[str, Any]
@@ -70,6 +75,7 @@ class SpySearchEntryPreset:
     parameters: dict[str, Any]
     description: str
     complexity_score: int
+    timeframe: str = "1d"
     experimental: bool = False
 
 
@@ -141,6 +147,24 @@ SPY_PRESETS: dict[str, SpyStrategyPreset] = {
         parameter_grid={"hma_length": [18, 21, 24], "rsi_length": [12, 14], "qqe_factor": [3.5, 4.236, 5.0]},
         experimental=True,
     ),
+    "intraday_pullback": SpyStrategyPreset(
+        key="intraday_pullback",
+        label="Daily Trend + Intraday Pullback",
+        strategy_name="Daily Trend + Intraday Pullback",
+        description="Uses the completed daily 200-day trend filter and buys completed intraday pullback recoveries.",
+        parameters={"rsi_length": 14, "oversold_threshold": 35.0, "recovery_threshold": 45.0, "moving_average_length": 8, "pullback_lookback_bars": 4, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False},
+        parameter_grid={"oversold_threshold": [30.0, 35.0, 40.0], "recovery_threshold": [40.0, 45.0, 50.0], "moving_average_length": [6, 8, 10]},
+        timeframes=("15m", "5m"),
+    ),
+    "intraday_breakout": SpyStrategyPreset(
+        key="intraday_breakout",
+        label="Daily Trend + Intraday Breakout",
+        strategy_name="Daily Trend + Intraday Breakout",
+        description="Uses the completed daily 200-day trend filter and buys completed intraday breakouts.",
+        parameters={"breakout_lookback_bars": 12, "exit_lookback_bars": 6, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False},
+        parameter_grid={"breakout_lookback_bars": [8, 12, 16], "exit_lookback_bars": [4, 6, 8]},
+        timeframes=("15m", "5m"),
+    ),
 }
 
 SPY_EXIT_STRUCTURES: dict[str, SpyExitStructure] = {
@@ -203,9 +227,9 @@ SPY_EXIT_STRUCTURES: dict[str, SpyExitStructure] = {
 }
 
 
-def list_spy_strategy_presets() -> list[SpyStrategyPreset]:
+def list_spy_strategy_presets(timeframe: str = "1d") -> list[SpyStrategyPreset]:
     """Return the supported SPY-only strategy presets."""
-    return list(SPY_PRESETS.values())
+    return [preset for preset in SPY_PRESETS.values() if timeframe in preset.timeframes]
 
 
 def get_spy_strategy_preset(preset_key: str) -> SpyStrategyPreset:
@@ -227,6 +251,7 @@ def build_spy_workbench_config(
     *,
     preset_key: str,
     entry_parameters: dict[str, Any],
+    timeframe: str,
     exit_structure_key: str,
     exit_parameters: dict[str, Any],
     start_date: str,
@@ -246,6 +271,7 @@ def build_spy_workbench_config(
         preset_key=preset_key,
         entry_label=preset.label,
         entry_parameters=dict(entry_parameters),
+        timeframe=timeframe,
         exit_structure_key=exit_structure_key,
         exit_structure_label=exit_structure.label,
         exit_parameters=dict(exit_parameters),
@@ -275,6 +301,10 @@ def build_spy_strategy(preset_key: str, custom_parameters: dict[str, Any] | None
         return BreakoutStrategy(**params)
     if preset_key == "qqe_hma_daily":
         return QQEHMAStrategy(**params)
+    if preset_key == "intraday_pullback":
+        return IntradayPullbackStrategy(**params)
+    if preset_key == "intraday_breakout":
+        return IntradayBreakoutStrategy(**params)
     raise ValueError(f"Unsupported SPY preset: {preset_key}")
 
 
@@ -292,6 +322,9 @@ def build_spy_backtest_config(workbench: SpyWorkbenchConfig) -> BacktestConfig:
         take_profit_pct=float(exit_params.get("take_profit_pct") or 0.0) or None,
         trailing_stop_pct=float(exit_params.get("trailing_stop_pct") or 0.0) or None,
         price_mode=workbench.price_mode,
+        timeframe=workbench.timeframe,
+        end_of_day_exit=bool(workbench.entry_parameters.get("end_of_day_exit", False) if is_intraday_timeframe(workbench.timeframe) else False),
+        allow_overnight=bool(workbench.entry_parameters.get("allow_overnight", True) if is_intraday_timeframe(workbench.timeframe) else True),
     )
 
 
@@ -301,6 +334,29 @@ def apply_spy_exit_structure(strategy, workbench: SpyWorkbenchConfig):
     if max_holding_days is not None:
         setattr(strategy, "max_holding_days", int(max_holding_days))
     return strategy
+
+
+def prepare_spy_timeframe_bars(*, primary_bars: pd.DataFrame, timeframe: str, daily_bars: pd.DataFrame | None = None, regime_sma_window: int = 200) -> pd.DataFrame:
+    """Prepare a timeframe-specific SPY frame, aligning completed daily regime data to intraday bars."""
+    frame = primary_bars.copy().sort_values("timestamp").reset_index(drop=True)
+    if timeframe == "1d":
+        return frame
+    if daily_bars is None or daily_bars.empty:
+        frame["daily_regime_bull"] = False
+        frame["daily_regime_source_date"] = pd.NaT
+        return frame
+    daily = daily_bars.copy().sort_values("timestamp").reset_index(drop=True)
+    daily["daily_trend_sma"] = daily["close"].rolling(regime_sma_window).mean()
+    daily["daily_regime_bull_raw"] = daily["close"] > daily["daily_trend_sma"]
+    daily["regime_for_next_session"] = daily["daily_regime_bull_raw"].shift(1).fillna(False)
+    daily["regime_source_date"] = pd.to_datetime(daily["session_date"]).shift(1)
+    merge = daily[["session_date", "regime_for_next_session", "regime_source_date"]].copy()
+    merge["session_date"] = pd.to_datetime(merge["session_date"]).dt.date
+    frame["session_date"] = pd.to_datetime(frame["session_date"]).dt.date
+    frame = frame.merge(merge, on="session_date", how="left")
+    frame["daily_regime_bull"] = frame["regime_for_next_session"].fillna(False).astype(bool)
+    frame["daily_regime_source_date"] = frame["regime_source_date"]
+    return frame.drop(columns=["regime_for_next_session", "regime_source_date"])
 
 
 def spy_strategy_summary(metrics: dict[str, float | int], *, benchmark_sharpe: float = 0.0) -> dict[str, float | int]:
@@ -644,23 +700,35 @@ def summarize_profit_concentration(trade_log: pd.DataFrame) -> dict[str, Any]:
     return profit_concentration_analysis(trade_log)
 
 
-def generate_approved_spy_entry_presets() -> list[SpySearchEntryPreset]:
+def generate_approved_spy_entry_presets(timeframe: str = "1d") -> list[SpySearchEntryPreset]:
     """Return the controlled SPY entry presets used by automated search."""
+    if timeframe == "1d":
+        return [
+            SpySearchEntryPreset("trend_150", "trend_filter_200", "SPY 200-Day Trend Filter", "Trend filter 150", {"sma_length": 150}, "Trend filter with a 150-day SMA.", 1, timeframe="1d"),
+            SpySearchEntryPreset("trend_200", "trend_filter_200", "SPY 200-Day Trend Filter", "Trend filter 200", {"sma_length": 200}, "Trend filter with a 200-day SMA.", 1, timeframe="1d"),
+            SpySearchEntryPreset("trend_250", "trend_filter_200", "SPY 200-Day Trend Filter", "Trend filter 250", {"sma_length": 250}, "Trend filter with a 250-day SMA.", 1, timeframe="1d"),
+            SpySearchEntryPreset("ma_20_100", "moving_average_50_200", "Moving Average Crossover", "MA 20/100", {"fast_window": 20, "slow_window": 100}, "Faster crossover for earlier entries.", 2, timeframe="1d"),
+            SpySearchEntryPreset("ma_50_150", "moving_average_50_200", "Moving Average Crossover", "MA 50/150", {"fast_window": 50, "slow_window": 150}, "Intermediate trend-following crossover.", 2, timeframe="1d"),
+            SpySearchEntryPreset("ma_50_200", "moving_average_50_200", "Moving Average Crossover", "MA 50/200", {"fast_window": 50, "slow_window": 200}, "Classic long-term crossover.", 2, timeframe="1d"),
+            SpySearchEntryPreset("rsi_30_50_10", "rsi_pullback_uptrend", "RSI Mean Reversion", "RSI 30/50 hold 10", {"rsi_length": 14, "buy_threshold": 30.0, "sell_threshold": 50.0, "max_holding_days": 10, "trend_sma_window": 200}, "Pullback buy with tight exit and short holding period.", 3, timeframe="1d"),
+            SpySearchEntryPreset("rsi_35_55_20", "rsi_pullback_uptrend", "RSI Mean Reversion", "RSI 35/55 hold 20", {"rsi_length": 14, "buy_threshold": 35.0, "sell_threshold": 55.0, "max_holding_days": 20, "trend_sma_window": 200}, "Balanced SPY pullback preset.", 3, timeframe="1d"),
+            SpySearchEntryPreset("rsi_40_60_30", "rsi_pullback_uptrend", "RSI Mean Reversion", "RSI 40/60 hold 30", {"rsi_length": 14, "buy_threshold": 40.0, "sell_threshold": 60.0, "max_holding_days": 30, "trend_sma_window": 200}, "Looser pullback entry with longer holding period.", 3, timeframe="1d"),
+            SpySearchEntryPreset("breakout_20_10", "breakout_50_20", "Daily Breakout", "Breakout 20 / exit 10", {"lookback_window": 20, "exit_lookback_window": 10}, "Shorter breakout and faster signal exit.", 2, timeframe="1d"),
+            SpySearchEntryPreset("breakout_50_20", "breakout_50_20", "Daily Breakout", "Breakout 50 / exit 20", {"lookback_window": 50, "exit_lookback_window": 20}, "Balanced breakout preset.", 2, timeframe="1d"),
+            SpySearchEntryPreset("breakout_100_50", "breakout_50_20", "Daily Breakout", "Breakout 100 / exit 50", {"lookback_window": 100, "exit_lookback_window": 50}, "Longer-term breakout filter.", 2, timeframe="1d"),
+            SpySearchEntryPreset("qqe_hma_conservative", "qqe_hma_daily", "QQE/HMA Daily", "QQE/HMA conservative", {"hma_length": 21, "rsi_length": 14, "rsi_smoothing": 5, "qqe_factor": 4.236, "atr_smoothing": 5, "require_hma_slope": True, "exit_on_hma_break": True, "exit_on_qqe_bearish": True}, "Conservative daily QQE/HMA preset.", 5, timeframe="1d", experimental=True),
+            SpySearchEntryPreset("qqe_hma_tight", "qqe_hma_daily", "QQE/HMA Daily", "QQE/HMA tight", {"hma_length": 18, "rsi_length": 12, "rsi_smoothing": 5, "qqe_factor": 3.5, "atr_smoothing": 5, "require_hma_slope": True, "exit_on_hma_break": True, "exit_on_qqe_bearish": True}, "Tighter experimental QQE/HMA preset.", 5, timeframe="1d", experimental=True),
+        ]
+    if timeframe == "15m":
+        return [
+            SpySearchEntryPreset("intraday_pullback_balanced", "intraday_pullback", "Daily Trend + Intraday Pullback", "15m pullback balanced", {"rsi_length": 14, "oversold_threshold": 35.0, "recovery_threshold": 45.0, "moving_average_length": 8, "pullback_lookback_bars": 4, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "15-minute pullback recovery under a completed daily trend filter.", 3, timeframe="15m"),
+            SpySearchEntryPreset("intraday_pullback_fast", "intraday_pullback", "Daily Trend + Intraday Pullback", "15m pullback fast", {"rsi_length": 12, "oversold_threshold": 30.0, "recovery_threshold": 42.0, "moving_average_length": 6, "pullback_lookback_bars": 3, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Faster 15-minute pullback recovery preset.", 3, timeframe="15m"),
+            SpySearchEntryPreset("intraday_breakout_balanced", "intraday_breakout", "Daily Trend + Intraday Breakout", "15m breakout balanced", {"breakout_lookback_bars": 12, "exit_lookback_bars": 6, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "15-minute breakout under a completed daily trend filter.", 2, timeframe="15m"),
+            SpySearchEntryPreset("intraday_breakout_slow", "intraday_breakout", "Daily Trend + Intraday Breakout", "15m breakout slow", {"breakout_lookback_bars": 16, "exit_lookback_bars": 8, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Slower 15-minute breakout preset.", 2, timeframe="15m"),
+        ]
     return [
-        SpySearchEntryPreset("trend_150", "trend_filter_200", "SPY 200-Day Trend Filter", "Trend filter 150", {"sma_length": 150}, "Trend filter with a 150-day SMA.", 1),
-        SpySearchEntryPreset("trend_200", "trend_filter_200", "SPY 200-Day Trend Filter", "Trend filter 200", {"sma_length": 200}, "Trend filter with a 200-day SMA.", 1),
-        SpySearchEntryPreset("trend_250", "trend_filter_200", "SPY 200-Day Trend Filter", "Trend filter 250", {"sma_length": 250}, "Trend filter with a 250-day SMA.", 1),
-        SpySearchEntryPreset("ma_20_100", "moving_average_50_200", "Moving Average Crossover", "MA 20/100", {"fast_window": 20, "slow_window": 100}, "Faster crossover for earlier entries.", 2),
-        SpySearchEntryPreset("ma_50_150", "moving_average_50_200", "Moving Average Crossover", "MA 50/150", {"fast_window": 50, "slow_window": 150}, "Intermediate trend-following crossover.", 2),
-        SpySearchEntryPreset("ma_50_200", "moving_average_50_200", "Moving Average Crossover", "MA 50/200", {"fast_window": 50, "slow_window": 200}, "Classic long-term crossover.", 2),
-        SpySearchEntryPreset("rsi_30_50_10", "rsi_pullback_uptrend", "RSI Mean Reversion", "RSI 30/50 hold 10", {"rsi_length": 14, "buy_threshold": 30.0, "sell_threshold": 50.0, "max_holding_days": 10, "trend_sma_window": 200}, "Pullback buy with tight exit and short holding period.", 3),
-        SpySearchEntryPreset("rsi_35_55_20", "rsi_pullback_uptrend", "RSI Mean Reversion", "RSI 35/55 hold 20", {"rsi_length": 14, "buy_threshold": 35.0, "sell_threshold": 55.0, "max_holding_days": 20, "trend_sma_window": 200}, "Balanced SPY pullback preset.", 3),
-        SpySearchEntryPreset("rsi_40_60_30", "rsi_pullback_uptrend", "RSI Mean Reversion", "RSI 40/60 hold 30", {"rsi_length": 14, "buy_threshold": 40.0, "sell_threshold": 60.0, "max_holding_days": 30, "trend_sma_window": 200}, "Looser pullback entry with longer holding period.", 3),
-        SpySearchEntryPreset("breakout_20_10", "breakout_50_20", "Daily Breakout", "Breakout 20 / exit 10", {"lookback_window": 20, "exit_lookback_window": 10}, "Shorter breakout and faster signal exit.", 2),
-        SpySearchEntryPreset("breakout_50_20", "breakout_50_20", "Daily Breakout", "Breakout 50 / exit 20", {"lookback_window": 50, "exit_lookback_window": 20}, "Balanced breakout preset.", 2),
-        SpySearchEntryPreset("breakout_100_50", "breakout_50_20", "Daily Breakout", "Breakout 100 / exit 50", {"lookback_window": 100, "exit_lookback_window": 50}, "Longer-term breakout filter.", 2),
-        SpySearchEntryPreset("qqe_hma_conservative", "qqe_hma_daily", "QQE/HMA Daily", "QQE/HMA conservative", {"hma_length": 21, "rsi_length": 14, "rsi_smoothing": 5, "qqe_factor": 4.236, "atr_smoothing": 5, "require_hma_slope": True, "exit_on_hma_break": True, "exit_on_qqe_bearish": True}, "Conservative daily QQE/HMA preset.", 5, experimental=True),
-        SpySearchEntryPreset("qqe_hma_tight", "qqe_hma_daily", "QQE/HMA Daily", "QQE/HMA tight", {"hma_length": 18, "rsi_length": 12, "rsi_smoothing": 5, "qqe_factor": 3.5, "atr_smoothing": 5, "require_hma_slope": True, "exit_on_hma_break": True, "exit_on_qqe_bearish": True}, "Tighter experimental QQE/HMA preset.", 5, experimental=True),
+        SpySearchEntryPreset("intraday_pullback_5m", "intraday_pullback", "Daily Trend + Intraday Pullback", "5m pullback experimental", {"rsi_length": 10, "oversold_threshold": 30.0, "recovery_threshold": 40.0, "moving_average_length": 8, "pullback_lookback_bars": 5, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Experimental 5-minute pullback recovery preset.", 4, timeframe="5m", experimental=True),
+        SpySearchEntryPreset("intraday_breakout_5m", "intraday_breakout", "Daily Trend + Intraday Breakout", "5m breakout experimental", {"breakout_lookback_bars": 18, "exit_lookback_bars": 8, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Experimental 5-minute breakout preset.", 4, timeframe="5m", experimental=True),
     ]
 
 
@@ -692,10 +760,10 @@ def generate_approved_spy_exit_presets() -> list[SpySearchExitPreset]:
     ]
 
 
-def generate_spy_search_combinations() -> list[SpySearchCombination]:
+def generate_spy_search_combinations(timeframe: str = "1d") -> list[SpySearchCombination]:
     """Generate the controlled SPY strategy-search grid."""
     combinations: list[SpySearchCombination] = []
-    for entry_preset, exit_preset in product(generate_approved_spy_entry_presets(), generate_approved_spy_exit_presets()):
+    for entry_preset, exit_preset in product(generate_approved_spy_entry_presets(timeframe), generate_approved_spy_exit_presets()):
         combinations.append(
             SpySearchCombination(
                 combination_id=f"{entry_preset.preset_id}__{exit_preset.exit_preset_id}",
@@ -712,6 +780,9 @@ def build_spy_search_summary_comment(result_row: dict[str, Any]) -> str:
     excess_cagr = float(result_row.get("excess_cagr", 0.0) or 0.0)
     drawdown_improvement = float(result_row.get("drawdown_improvement", 0.0) or 0.0)
     experimental = bool(result_row.get("experimental", False))
+    timeframe = str(result_row.get("timeframe", "1d"))
+    if timeframe in {"15m", "5m"} and trades < 10:
+        return "This intraday result uses a much shorter yfinance history window and still has too few trades to trust."
     if trades < 5:
         return "This result has strong-looking performance but too few trades to trust."
     if excess_cagr > 0 and drawdown_improvement > 0:
@@ -734,6 +805,7 @@ def grade_spy_search_candidate(result_row: dict[str, Any]) -> tuple[str, int]:
     profit_factor = float(result_row.get("profit_factor", 0.0) or 0.0)
     avg_r_multiple = float(result_row.get("avg_r_multiple", 0.0) or 0.0)
     exposure_pct = float(result_row.get("exposure_pct", 0.0) or 0.0)
+    timeframe = str(result_row.get("timeframe", "1d"))
     red_flag_count = 0
     if trades < 10:
         red_flag_count += 1
@@ -752,6 +824,8 @@ def grade_spy_search_candidate(result_row: dict[str, Any]) -> tuple[str, int]:
     if exposure_pct > 0.98:
         red_flag_count += 1
     if bool(result_row.get("experimental", False)):
+        red_flag_count += 1
+    if timeframe in {"15m", "5m"}:
         red_flag_count += 1
     if trades == 0 or (cagr <= 0 and excess_cagr <= 0 and profit_factor <= 1.0):
         return "Reject", red_flag_count
@@ -804,6 +878,7 @@ def run_automated_spy_search(
     *,
     engine,
     data_by_symbol: dict[str, pd.DataFrame],
+    timeframe: str,
     start_date: str,
     end_date: str,
     price_mode: str,
@@ -812,6 +887,7 @@ def run_automated_spy_search(
     position_sizing_value: float,
     slippage_pct: float,
     commission_per_trade: float,
+    daily_bars: pd.DataFrame | None = None,
     persist_backtest_runs: bool = False,
     progress_callback=None,
 ) -> tuple[dict[str, Any], pd.DataFrame, dict[str, dict[str, Any]]]:
@@ -820,15 +896,17 @@ def run_automated_spy_search(
     By default this runs ephemerally and persists only the search summary rows.
     That avoids writing hundreds of full backtest payloads into DuckDB for one search run.
     """
-    combinations = generate_spy_search_combinations()
+    combinations = generate_spy_search_combinations(timeframe)
     search_run_id = str(uuid4())
     rows: list[dict[str, Any]] = []
     total = len(combinations)
     search_engine = engine if persist_backtest_runs else BacktestEngine(database=None)
+    primary_bars = prepare_spy_timeframe_bars(primary_bars=data_by_symbol["SPY"], timeframe=timeframe, daily_bars=daily_bars)
     for idx, combination in enumerate(combinations, start=1):
         workbench = build_spy_workbench_config(
             preset_key=combination.entry_preset.preset_key,
             entry_parameters=combination.entry_preset.parameters,
+            timeframe=timeframe,
             exit_structure_key=combination.exit_preset.exit_structure_key,
             exit_parameters=combination.exit_preset.parameters,
             start_date=start_date,
@@ -843,7 +921,7 @@ def run_automated_spy_search(
         )
         strategy = apply_spy_exit_structure(build_spy_strategy(workbench.preset_key, workbench.entry_parameters), workbench)
         config = build_spy_backtest_config(workbench)
-        result = search_engine.run(data_by_symbol={"SPY": data_by_symbol["SPY"]}, strategy=strategy, config=config, benchmark_symbol="SPY")
+        result = search_engine.run(data_by_symbol={"SPY": primary_bars}, strategy=strategy, config=config, benchmark_symbol="SPY")
         concentration = summarize_profit_concentration(result.trade_log)
         robustness = compute_robustness_score(result.metrics, concentration=concentration)
         avg_r_multiple = average_r_multiple(result.trade_log, workbench.exit_parameters)
@@ -857,6 +935,7 @@ def run_automated_spy_search(
         row = {
             "result_id": str(uuid4()),
             "search_run_id": search_run_id,
+            "timeframe": timeframe,
             "entry_strategy_name": combination.entry_preset.entry_strategy_name,
             "entry_parameters_json": combination.entry_preset.parameters,
             "entry_preset_id": combination.entry_preset.preset_id,
@@ -906,6 +985,7 @@ def run_automated_spy_search(
         "created_at": datetime.now(UTC).replace(tzinfo=None),
         "start_date": start_date,
         "end_date": end_date,
+        "timeframe": timeframe,
         "price_mode": price_mode,
         "initial_capital": float(initial_capital),
         "slippage_pct": float(slippage_pct),

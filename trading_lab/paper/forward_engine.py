@@ -12,7 +12,10 @@ from trading_lab.backtest.engine import BacktestConfig, BacktestEngine
 from trading_lab.backtest.execution import apply_slippage
 from trading_lab.backtest.metrics import compute_summary_metrics
 from trading_lab.data.providers.yfinance_provider import CacheStatus, YFinanceDataProvider
+from trading_lab.spy_lab import prepare_spy_timeframe_bars
 from trading_lab.strategies.breakout import BreakoutStrategy
+from trading_lab.strategies.intraday_breakout import IntradayBreakoutStrategy
+from trading_lab.strategies.intraday_pullback import IntradayPullbackStrategy
 from trading_lab.strategies.moving_average import MovingAverageCrossStrategy
 from trading_lab.strategies.qqe_hma_strategy import QQEHMAStrategy
 from trading_lab.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
@@ -30,6 +33,10 @@ STRATEGY_NAME_MAP = {
     "daily_breakout": "Daily Breakout",
     "QQE/HMA Daily": "qqe_hma_strategy",
     "qqe_hma_strategy": "QQE/HMA Daily",
+    "Daily Trend + Intraday Pullback": "intraday_pullback",
+    "intraday_pullback": "Daily Trend + Intraday Pullback",
+    "Daily Trend + Intraday Breakout": "intraday_breakout",
+    "intraday_breakout": "Daily Trend + Intraday Breakout",
 }
 
 
@@ -66,6 +73,10 @@ def build_strategy_instance(strategy_name: str, parameters: dict[str, Any]):
         return BreakoutStrategy(**parameters)
     if normalized == "QQE/HMA Daily":
         return QQEHMAStrategy(**parameters)
+    if normalized == "Daily Trend + Intraday Pullback":
+        return IntradayPullbackStrategy(**parameters)
+    if normalized == "Daily Trend + Intraday Breakout":
+        return IntradayBreakoutStrategy(**parameters)
     raise ValueError(f"Unsupported active paper strategy: {strategy_name}")
 
 
@@ -87,6 +98,7 @@ def build_active_paper_strategy_payload(
     universe_name: str,
     tickers: list[str],
     benchmark_symbol: str,
+    timeframe: str = "1d",
     price_mode: str,
     initial_capital: float,
     position_sizing_method: str,
@@ -116,6 +128,7 @@ def build_active_paper_strategy_payload(
         "strategy_parameters_json": json.dumps(strategy_parameters, default=str),
         "universe_name": universe_name,
         "tickers": ",".join(tickers),
+        "timeframe": timeframe,
         "benchmark_symbol": benchmark_symbol,
         "price_mode": price_mode,
         "initial_capital": float(initial_capital),
@@ -223,6 +236,7 @@ class ForwardPaperEngine:
     ) -> ForwardUpdateResult:
         tickers = [item.strip().upper() for item in str(active_strategy.get("tickers") or "").split(",") if item.strip()]
         benchmark_symbol = str(active_strategy.get("benchmark_symbol") or "SPY").upper()
+        timeframe = str(active_strategy.get("timeframe") or "1d")
         if not tickers:
             return self._skip_result(str(active_strategy["active_strategy_id"]), "No tickers were configured for this active paper strategy.")
 
@@ -240,7 +254,7 @@ class ForwardPaperEngine:
                 symbol=symbol,
                 start_date=str(warmup_start),
                 end_date=str(fetch_end),
-                timeframe="1d",
+                timeframe=timeframe,
                 force_refresh=False,
             )
             data_by_symbol[symbol] = bars
@@ -265,8 +279,18 @@ class ForwardPaperEngine:
         risk_settings = parse_strategy_parameters(active_strategy.get("risk_settings_json"))
         fill_rule = str(risk_settings.get("fill_rule", "next_open"))
         ambiguity_rule = str(risk_settings.get("same_bar_stop_target_rule", "conservative_stop_first"))
+        end_of_day_exit = bool(risk_settings.get("end_of_day_exit", timeframe != "1d"))
+        allow_overnight = bool(risk_settings.get("allow_overnight", timeframe == "1d"))
 
-        prepared = self._prepare_frames({symbol: data_by_symbol[symbol] for symbol in tickers}, strategy, price_mode)
+        prepared_input = {symbol: data_by_symbol[symbol] for symbol in tickers}
+        if timeframe != "1d" and benchmark_symbol in data_by_symbol:
+            daily_start = str((activation_date - pd.Timedelta(days=self.warmup_days)).date())
+            daily_bars = provider.get_stock_bars(symbol=benchmark_symbol, start_date=daily_start, end_date=str(fetch_end), timeframe="1d", force_refresh=False)
+            prepared_input = {
+                symbol: prepare_spy_timeframe_bars(primary_bars=prepared_input[symbol], timeframe=timeframe, daily_bars=daily_bars)
+                for symbol in prepared_input
+            }
+        prepared = self._prepare_frames(prepared_input, strategy, price_mode)
         benchmark_curve = self.backtest_engine._build_benchmark_curve(  # noqa: SLF001
             data_by_symbol,
             benchmark_symbol,
@@ -275,6 +299,7 @@ class ForwardPaperEngine:
             BacktestConfig(
                 initial_capital=float(active_strategy.get("initial_capital", 1.0) or 1.0),
                 price_mode=price_mode,
+                timeframe=timeframe,
             ),
         )
 
@@ -347,6 +372,24 @@ class ForwardPaperEngine:
                         current_positions.pop(symbol, None)
                         continue
 
+                    if timeframe != "1d" and end_of_day_exit and not allow_overnight and self._is_session_end(current_ts, all_timestamps):
+                        exit_price = apply_slippage(float(bar["close"]), float(active_strategy.get("slippage_pct", 0.0) or 0.0), "sell")
+                        self._close_position(
+                            active_strategy_id=str(active_strategy["active_strategy_id"]),
+                            position=position,
+                            exit_timestamp=current_ts,
+                            exit_price=exit_price,
+                            exit_reason="end_of_day_exit",
+                            commission=float(active_strategy.get("commission_per_trade", 0.0) or 0.0),
+                            cash_ref={"cash": cash},
+                            position_rows=position_rows,
+                            trade_rows=trade_rows,
+                            event_rows=event_rows,
+                        )
+                        cash = float(position.pop("_cash_after_close"))
+                        current_positions.pop(symbol, None)
+                        continue
+
                     position["holding_days"] += 1
                     position["highest_close"] = max(float(position["highest_close"]), current_prices[symbol])
                     if position.get("trailing_stop_pct"):
@@ -372,6 +415,7 @@ class ForwardPaperEngine:
                     "active_strategy_id": str(active_strategy["active_strategy_id"]),
                     "created_at": prev_ts,
                     "ticker": symbol,
+                    "timeframe": timeframe,
                     "order_type": "market",
                     "side": "buy",
                     "status": "pending",
@@ -415,6 +459,7 @@ class ForwardPaperEngine:
                     "position_id": str(uuid4()),
                     "active_strategy_id": str(active_strategy["active_strategy_id"]),
                     "ticker": symbol,
+                    "timeframe": timeframe,
                     "strategy_name": str(active_strategy["strategy_name"]),
                     "entry_signal_date": prev_ts,
                     "entry_date": current_ts,
@@ -471,6 +516,7 @@ class ForwardPaperEngine:
                     "active_strategy_id": str(active_strategy["active_strategy_id"]),
                     "created_at": last_timestamp,
                     "ticker": symbol,
+                    "timeframe": timeframe,
                     "order_type": "market",
                     "side": "buy",
                     "status": "pending",
@@ -537,8 +583,14 @@ class ForwardPaperEngine:
     def _prepare_frames(self, data_by_symbol: dict[str, pd.DataFrame], strategy, price_mode: str) -> dict[str, pd.DataFrame]:
         return self.backtest_engine._prepare_frames(data_by_symbol, strategy, price_mode)  # noqa: SLF001
 
+    def _is_session_end(self, current_ts: pd.Timestamp, all_timestamps: list[pd.Timestamp]) -> bool:
+        current_idx = all_timestamps.index(current_ts)
+        if current_idx >= len(all_timestamps) - 1:
+            return True
+        return pd.Timestamp(all_timestamps[current_idx + 1]).date() != pd.Timestamp(current_ts).date()
+
     def _has_severe_warning(self, warnings: list[str]) -> bool:
-        severe_tokens = ["required columns", "high/low", "volume", "negative", "missing trading sessions"]
+        severe_tokens = ["required columns", "high/low", "volume", "negative", "missing trading sessions", "missing intraday bars"]
         lowered = " ".join(str(item).lower() for item in warnings)
         return any(token in lowered for token in severe_tokens)
 
@@ -638,6 +690,7 @@ class ForwardPaperEngine:
                 "trade_id": str(uuid4()),
                 "active_strategy_id": active_strategy_id,
                 "ticker": position["ticker"],
+                "timeframe": position.get("timeframe", "1d"),
                 "strategy_name": position["strategy_name"],
                 "entry_signal_date": position["entry_signal_date"],
                 "entry_date": position["entry_date"],

@@ -29,6 +29,7 @@ from trading_lab.backtest.sweep import run_parameter_sweep, summarize_parameter_
 from trading_lab.backtest.train_test import run_train_test_analysis, split_data_by_date, split_data_by_percentage
 from trading_lab.backtest.walk_forward import run_walk_forward_analysis
 from trading_lab.data.database import TradingLabDatabase
+from trading_lab.data.intraday import INTRADAY_MAX_HISTORY_DAYS, is_intraday_timeframe
 from trading_lab.data.providers.yfinance_provider import CacheStatus, YFinanceDataProvider
 from trading_lab.data.universes import get_universe_tickers, list_universe_names, normalize_ticker_list
 from trading_lab.indicators.hma import hull_moving_average
@@ -60,6 +61,7 @@ from trading_lab.spy_lab import (
     grade_spy_search_candidate,
     list_spy_exit_structures,
     list_spy_strategy_presets,
+    prepare_spy_timeframe_bars,
     rank_spy_search_results,
     run_automated_spy_search,
     run_spy_exit_comparison,
@@ -220,13 +222,14 @@ def collect_data(
     end_date: str,
     refresh_data: bool,
     benchmark_symbol: str | None = None,
+    timeframe: str = "1d",
 ) -> tuple[dict[str, pd.DataFrame], list[CacheStatus], list[str]]:
     data_by_symbol: dict[str, pd.DataFrame] = {}
     statuses: list[CacheStatus] = []
     validation_warnings: list[str] = []
     fetch_symbols = list(dict.fromkeys(symbols + ([benchmark_symbol] if benchmark_symbol else [])))
     for symbol in fetch_symbols:
-        bars = provider.get_stock_bars(symbol=symbol, start_date=start_date, end_date=end_date, timeframe="1d", force_refresh=refresh_data)
+        bars = provider.get_stock_bars(symbol=symbol, start_date=start_date, end_date=end_date, timeframe=timeframe, force_refresh=refresh_data)
         data_by_symbol[symbol] = bars
         status = provider.get_last_fetch_status(symbol)
         if status is not None:
@@ -2050,14 +2053,22 @@ def render_spy_strategy_lab(
     st.subheader("A. Strategy Setup")
     st.info("This workbench is fixed to SPY. It is the recommended primary workflow for the app.")
     setup_cols = st.columns([1.4, 1.1])
-    presets = list_spy_strategy_presets()
+    timeframe_label = setup_cols[0].selectbox("Timeframe", ["Daily", "15-minute", "5-minute experimental"], key="spy_workbench_timeframe")
+    timeframe_map = {"Daily": "1d", "15-minute": "15m", "5-minute experimental": "5m"}
+    selected_timeframe = timeframe_map[timeframe_label]
+    if selected_timeframe != "1d":
+        st.warning(
+            "yfinance intraday history is limited to roughly the last "
+            f"{INTRADAY_MAX_HISTORY_DAYS} days. Intraday results are short-history only, and 5-minute mode is more noise-sensitive."
+        )
+    presets = list_spy_strategy_presets(selected_timeframe)
     preset_labels = [preset.label for preset in presets]
     selected_label = setup_cols[0].selectbox("Entry strategy", preset_labels, key="spy_workbench_preset")
     preset = next(item for item in presets if item.label == selected_label)
     setup_cols[0].write(preset.description)
     if preset.experimental:
         setup_cols[0].warning("Experimental preset. It needs stronger evidence than the simpler SPY strategies.")
-    setup_cols[1].write({"Ticker": "SPY", "Benchmark": "SPY buy-and-hold"})
+    setup_cols[1].write({"Ticker": "SPY", "Benchmark": "SPY buy-and-hold", "Timeframe": selected_timeframe})
 
     exit_structures = list_spy_exit_structures()
     exit_catalog = pd.DataFrame(
@@ -2085,6 +2096,19 @@ def render_spy_strategy_lab(
         elif preset.key == "breakout_50_20":
             custom_params["lookback_window"] = st.number_input("Breakout lookback", min_value=2, value=int(custom_params["lookback_window"]), key="spy_workbench_breakout_lookback")
             custom_params["exit_lookback_window"] = st.number_input("Signal exit lookback", min_value=2, value=int(custom_params["exit_lookback_window"]), key="spy_workbench_exit_lookback")
+        elif preset.key == "intraday_pullback":
+            custom_params["rsi_length"] = st.number_input("Intraday RSI length", min_value=2, value=int(custom_params["rsi_length"]), key="spy_workbench_intraday_rsi_length")
+            custom_params["oversold_threshold"] = st.number_input("Oversold threshold", min_value=1.0, max_value=60.0, value=float(custom_params["oversold_threshold"]), key="spy_workbench_intraday_oversold")
+            custom_params["recovery_threshold"] = st.number_input("Recovery threshold", min_value=1.0, max_value=90.0, value=float(custom_params["recovery_threshold"]), key="spy_workbench_intraday_recovery")
+            custom_params["moving_average_length"] = st.number_input("Intraday MA length", min_value=2, value=int(custom_params["moving_average_length"]), key="spy_workbench_intraday_ma")
+            custom_params["pullback_lookback_bars"] = st.number_input("Pullback lookback bars", min_value=1, value=int(custom_params["pullback_lookback_bars"]), key="spy_workbench_intraday_pullback_lookback")
+            custom_params["end_of_day_exit"] = st.checkbox("End-of-day exit", value=bool(custom_params["end_of_day_exit"]), key="spy_workbench_intraday_eod")
+            custom_params["allow_overnight"] = st.checkbox("Allow overnight", value=bool(custom_params["allow_overnight"]), key="spy_workbench_intraday_overnight")
+        elif preset.key == "intraday_breakout":
+            custom_params["breakout_lookback_bars"] = st.number_input("Breakout lookback bars", min_value=2, value=int(custom_params["breakout_lookback_bars"]), key="spy_workbench_intraday_breakout")
+            custom_params["exit_lookback_bars"] = st.number_input("Exit lookback bars", min_value=2, value=int(custom_params["exit_lookback_bars"]), key="spy_workbench_intraday_exit")
+            custom_params["end_of_day_exit"] = st.checkbox("End-of-day exit", value=bool(custom_params["end_of_day_exit"]), key="spy_workbench_intraday_breakout_eod")
+            custom_params["allow_overnight"] = st.checkbox("Allow overnight", value=bool(custom_params["allow_overnight"]), key="spy_workbench_intraday_breakout_overnight")
         else:
             custom_params["hma_length"] = st.number_input("HMA length", min_value=2, value=int(custom_params["hma_length"]), key="spy_workbench_hma_length")
             custom_params["rsi_length"] = st.number_input("QQE RSI length", min_value=2, value=int(custom_params["rsi_length"]), key="spy_workbench_qqe_rsi_length")
@@ -2121,6 +2145,7 @@ def render_spy_strategy_lab(
     workbench = build_spy_workbench_config(
         preset_key=preset.key,
         entry_parameters=custom_params,
+        timeframe=selected_timeframe,
         exit_structure_key=exit_structure.key,
         exit_parameters=exit_params,
         start_date=workbench_start,
@@ -2136,9 +2161,9 @@ def render_spy_strategy_lab(
 
     st.subheader("A. Automated SPY Search")
     st.caption("Run the approved SPY strategy-and-exit grid automatically, rank the candidates, then promote one exact configuration into forward paper trading.")
-    approved_entry_count = len(generate_approved_spy_entry_presets())
+    approved_entry_count = len(generate_approved_spy_entry_presets(workbench.timeframe))
     approved_exit_count = len(generate_approved_spy_exit_presets())
-    combination_count = len(generate_spy_search_combinations())
+    combination_count = len(generate_spy_search_combinations(workbench.timeframe))
     search_cols = st.columns(4)
     search_cols[0].metric("Entry presets", approved_entry_count)
     search_cols[1].metric("Exit presets", approved_exit_count)
@@ -2150,7 +2175,20 @@ def render_spy_strategy_lab(
     search_tags = st.text_input("Search tags", value="spy-only,automated-search", key="spy_search_tags")
     if st.button("Run Automated SPY Search", key="spy_search_run_button", type="secondary"):
         with st.spinner("Running automated SPY strategy search..."):
-            data_by_symbol, statuses, validation_warnings = collect_data(provider, ["SPY"], workbench.start_date, workbench.end_date, refresh_data, benchmark_symbol="SPY")
+            data_by_symbol, statuses, validation_warnings = collect_data(provider, ["SPY"], workbench.start_date, workbench.end_date, refresh_data, benchmark_symbol="SPY", timeframe=workbench.timeframe)
+            daily_context = None
+            if is_intraday_timeframe(workbench.timeframe):
+                daily_context = provider.get_stock_bars(
+                    symbol="SPY",
+                    start_date=str((pd.Timestamp(workbench.start_date) - pd.Timedelta(days=450)).date()),
+                    end_date=workbench.end_date,
+                    timeframe="1d",
+                    force_refresh=refresh_data,
+                )
+                daily_status = provider.get_last_fetch_status("SPY")
+                if daily_status is not None:
+                    statuses.append(daily_status)
+                    validation_warnings.extend([f"SPY daily regime: {warning}" for warning in daily_status.validation_warnings])
             progress = st.progress(0.0, text="Starting automated SPY search...")
             progress_rows: list[str] = []
 
@@ -2164,6 +2202,7 @@ def render_spy_strategy_lab(
             payload, results, highlights = run_automated_spy_search(
                 engine=BacktestEngine(database=db),
                 data_by_symbol={"SPY": data_by_symbol["SPY"]},
+                timeframe=workbench.timeframe,
                 start_date=workbench.start_date,
                 end_date=workbench.end_date,
                 price_mode=workbench.price_mode,
@@ -2172,6 +2211,7 @@ def render_spy_strategy_lab(
                 position_sizing_value=workbench.position_size_value,
                 slippage_pct=workbench.slippage_pct,
                 commission_per_trade=workbench.commission_per_trade,
+                daily_bars=daily_context,
                 persist_backtest_runs=False,
                 progress_callback=_progress_callback,
             )
@@ -2190,7 +2230,7 @@ def render_spy_strategy_lab(
     saved_search_runs = db.list_spy_strategy_search_runs(limit=50)
     if not saved_search_runs.empty:
         saved_search_labels = {
-            str(row["search_run_id"]): f"{row['created_at']} | {row['start_date']} to {row['end_date']} | {int(row['total_combinations_tested'])} combos"
+            str(row["search_run_id"]): f"{row['created_at']} | {row['timeframe']} | {row['start_date']} to {row['end_date']} | {int(row['total_combinations_tested'])} combos"
             for _, row in saved_search_runs.iterrows()
         }
         selected_search_run_id = st.selectbox(
@@ -2212,13 +2252,29 @@ def render_spy_strategy_lab(
 
     if st.button("Run SPY Workbench Backtest", key="spy_workbench_run", type="primary"):
         with st.spinner("Running SPY trading workbench backtest..."):
-            data_by_symbol, statuses, validation_warnings = collect_data(provider, ["SPY"], workbench.start_date, workbench.end_date, refresh_data, benchmark_symbol="SPY")
+            daily_context = None
+            if is_intraday_timeframe(workbench.timeframe):
+                data_by_symbol, statuses, validation_warnings = collect_data(provider, ["SPY"], workbench.start_date, workbench.end_date, refresh_data, benchmark_symbol="SPY", timeframe=workbench.timeframe)
+                daily_context = provider.get_stock_bars(
+                    symbol="SPY",
+                    start_date=str((pd.Timestamp(workbench.start_date) - pd.Timedelta(days=450)).date()),
+                    end_date=workbench.end_date,
+                    timeframe="1d",
+                    force_refresh=refresh_data,
+                )
+                daily_status = provider.get_last_fetch_status("SPY")
+                if daily_status is not None:
+                    statuses.append(daily_status)
+                    validation_warnings.extend([f"SPY daily regime: {warning}" for warning in daily_status.validation_warnings])
+            else:
+                data_by_symbol, statuses, validation_warnings = collect_data(provider, ["SPY"], workbench.start_date, workbench.end_date, refresh_data, benchmark_symbol="SPY", timeframe=workbench.timeframe)
             strategy = apply_spy_exit_structure(build_spy_strategy(workbench.preset_key, workbench.entry_parameters), workbench)
             config = build_spy_backtest_config(workbench)
             engine = BacktestEngine(database=db)
-            result = engine.run(data_by_symbol={"SPY": data_by_symbol["SPY"]}, strategy=strategy, config=config, benchmark_symbol="SPY")
+            prepared_bars = prepare_spy_timeframe_bars(primary_bars=data_by_symbol["SPY"], timeframe=workbench.timeframe, daily_bars=daily_context)
+            result = engine.run(data_by_symbol={"SPY": prepared_bars}, strategy=strategy, config=config, benchmark_symbol="SPY")
             result.metrics["Average R Multiple"] = average_r_multiple(result.trade_log, workbench.exit_parameters)
-            research = analyze_current_result(db, {"SPY": data_by_symbol["SPY"]}, result, config, workbench.entry_parameters, "SPY", ["SPY"], workbench.start_date, workbench.end_date)
+            research = analyze_current_result(db, {"SPY": prepared_bars}, result, config, workbench.entry_parameters, "SPY", ["SPY"], workbench.start_date, workbench.end_date)
         st.session_state[SESSION_SPY_LAB_KEY] = {
             "workbench": workbench,
             "preset_label": preset.label,
@@ -2226,7 +2282,7 @@ def render_spy_strategy_lab(
             "research": research,
             "statuses": statuses,
             "validation_warnings": validation_warnings,
-            "data_by_symbol": {"SPY": data_by_symbol["SPY"]},
+            "data_by_symbol": {"SPY": prepared_bars},
         }
 
     search_state = st.session_state.get(SESSION_SPY_SEARCH_KEY)
@@ -2269,14 +2325,18 @@ def render_spy_strategy_lab(
         st.write(
             {
                 "search_run_id": payload["search_run_id"],
+                "timeframe": payload.get("timeframe", "1d"),
                 "total_combinations_tested": payload["total_combinations_tested"],
                 "notes": payload["notes"],
                 "tags": payload["tags"],
             }
         )
+        if str(payload.get("timeframe", "1d")) != "1d":
+            st.warning("Intraday results have much shorter history and should not be compared directly to long-history daily results.")
         st.dataframe(
             filtered_results[
                 [
+                    "timeframe",
                     "entry_preset_label",
                     "exit_preset_label",
                     "candidate_label",
@@ -2345,13 +2405,22 @@ def render_spy_strategy_lab(
                         strategy_parameters={**selected_result["entry_parameters_json"], "__workbench_exit_structure__": str(selected_result["exit_structure_key"])},
                         universe_name="SPY Workbench Automated Search",
                         tickers=["SPY"],
+                        timeframe=str(selected_result.get("timeframe", workbench.timeframe)),
                         benchmark_symbol="SPY",
                         price_mode=workbench.price_mode,
                         initial_capital=workbench.initial_capital,
                         position_sizing_method=workbench.position_sizing_method,
                         position_sizing_value=workbench.position_size_value,
                         max_positions=1,
-                        risk_settings={**selected_result["exit_parameters_json"], "fill_rule": "next_open", "same_bar_stop_target_rule": "conservative_stop_first", "exit_structure_key": selected_result["exit_structure_key"], "exit_structure_name": selected_result["exit_structure_name"]},
+                        risk_settings={
+                            **selected_result["exit_parameters_json"],
+                            "fill_rule": "next_open",
+                            "same_bar_stop_target_rule": "conservative_stop_first",
+                            "exit_structure_key": selected_result["exit_structure_key"],
+                            "exit_structure_name": selected_result["exit_structure_name"],
+                            "end_of_day_exit": bool(selected_result["entry_parameters_json"].get("end_of_day_exit", False)),
+                            "allow_overnight": bool(selected_result["entry_parameters_json"].get("allow_overnight", True)),
+                        },
                         slippage_pct=workbench.slippage_pct,
                         commission_per_trade=workbench.commission_per_trade,
                         linked_backtest_run_id=str(selected_result["backtest_run_id"]) if pd.notna(selected_result["backtest_run_id"]) and selected_result["backtest_run_id"] else None,
@@ -2385,24 +2454,40 @@ def render_spy_strategy_lab(
                     st.success(f"Automated SPY search result promoted to forward paper trading: {promote_payload['active_strategy_id']}")
 
     state = st.session_state.get(SESSION_SPY_LAB_KEY)
-    latest_bars = provider.get_stock_bars(symbol="SPY", start_date=str((pd.Timestamp(workbench.end_date) - pd.Timedelta(days=450)).date()), end_date=workbench.end_date, timeframe="1d", force_refresh=False)
+    latest_bars = provider.get_stock_bars(
+        symbol="SPY",
+        start_date=str((pd.Timestamp(workbench.end_date) - pd.Timedelta(days=450)).date()),
+        end_date=workbench.end_date,
+        timeframe=workbench.timeframe,
+        force_refresh=False,
+    )
     latest_status = provider.get_last_fetch_status("SPY")
+    latest_daily_context = None
+    if is_intraday_timeframe(workbench.timeframe):
+        latest_daily_context = provider.get_stock_bars(
+            symbol="SPY",
+            start_date=str((pd.Timestamp(workbench.end_date) - pd.Timedelta(days=450)).date()),
+            end_date=workbench.end_date,
+            timeframe="1d",
+            force_refresh=False,
+        )
     strategy_for_signal = apply_spy_exit_structure(build_spy_strategy(workbench.preset_key, workbench.entry_parameters), workbench)
+    signal_bars = prepare_spy_timeframe_bars(primary_bars=latest_bars, timeframe=workbench.timeframe, daily_bars=latest_daily_context)
     active_spy = db.list_active_paper_strategies()
     active_spy = active_spy[active_spy["tickers"].fillna("").eq("SPY")] if not active_spy.empty else pd.DataFrame()
     selected_active = db.get_active_paper_strategy(str(active_spy.iloc[0]["active_strategy_id"])) if not active_spy.empty else None
     pending_orders = db.read_forward_paper_orders(str(selected_active["active_strategy_id"])) if selected_active else pd.DataFrame()
     open_positions = db.read_forward_paper_positions(str(selected_active["active_strategy_id"])) if selected_active else pd.DataFrame()
     signal_panel = spy_daily_signal_status(
-        bars=latest_bars,
+        bars=signal_bars,
         strategy=strategy_for_signal,
-        latest_close=float(latest_bars["close"].iloc[-1]) if not latest_bars.empty else 0.0,
+        latest_close=float(signal_bars["close"].iloc[-1]) if not signal_bars.empty else 0.0,
         data_freshness_status=str(latest_status.cache_status if latest_status is not None else "unknown"),
         pending_orders=pending_orders,
         open_positions=open_positions,
     )
 
-    st.subheader("SPY Daily Signal Panel")
+    st.subheader("SPY Signal Panel")
     signal_cols = st.columns(4)
     signal_cols[0].metric("Latest Signal", str(signal_panel["current_signal"]))
     signal_cols[1].metric("Position State", str(signal_panel["position_state"]))
@@ -2410,12 +2495,18 @@ def render_spy_strategy_lab(
     signal_cols[3].metric("Next Expected Action", str(signal_panel["next_expected_action"]))
     st.write(
         {
+            "timeframe": workbench.timeframe,
             "last_signal_date": signal_panel["last_signal_date"],
             "pending_forward_order": bool(signal_panel["pending_order"]),
             "open_forward_position": bool(signal_panel["open_position"]),
             "data_freshness_status": signal_panel["data_freshness_status"],
+            "latest_data_timestamp": str(pd.to_datetime(signal_bars["timestamp"]).max()) if not signal_bars.empty else None,
+            "bars_loaded": int(len(signal_bars)),
+            "date_range_loaded": f"{pd.to_datetime(signal_bars['timestamp']).min()} to {pd.to_datetime(signal_bars['timestamp']).max()}" if not signal_bars.empty else None,
         }
     )
+    if latest_status is not None and latest_status.validation_warnings:
+        render_warning_list(latest_status.validation_warnings, "No timeframe-specific warnings.")
     if not active_spy.empty:
         st.dataframe(active_spy[["active_strategy_id", "status", "created_at", "current_paper_equity", "strategy_name", "notes", "tags"]], use_container_width=True)
         if st.button("Run Forward Paper Update", key="spy_workbench_forward_update"):
@@ -2568,13 +2659,21 @@ def render_spy_strategy_lab(
                 strategy_parameters={**current_workbench.entry_parameters, "__workbench_exit_structure__": current_workbench.exit_structure_key},
                 universe_name="SPY Workbench",
                 tickers=["SPY"],
+                timeframe=current_workbench.timeframe,
                 benchmark_symbol="SPY",
                 price_mode=current_workbench.price_mode,
                 initial_capital=current_workbench.initial_capital,
                 position_sizing_method=current_workbench.position_sizing_method,
                 position_sizing_value=current_workbench.position_size_value,
                 max_positions=1,
-                risk_settings={**current_workbench.exit_parameters, "fill_rule": "next_open", "same_bar_stop_target_rule": "conservative_stop_first", "exit_structure_key": current_workbench.exit_structure_key},
+                risk_settings={
+                    **current_workbench.exit_parameters,
+                    "fill_rule": "next_open",
+                    "same_bar_stop_target_rule": "conservative_stop_first",
+                    "exit_structure_key": current_workbench.exit_structure_key,
+                    "end_of_day_exit": bool(current_workbench.entry_parameters.get("end_of_day_exit", False)),
+                    "allow_overnight": bool(current_workbench.entry_parameters.get("allow_overnight", True)),
+                },
                 slippage_pct=current_workbench.slippage_pct,
                 commission_per_trade=current_workbench.commission_per_trade,
                 linked_backtest_run_id=result.run_id,

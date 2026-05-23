@@ -47,10 +47,15 @@ def make_bars(symbol: str, closes: list[float], start: str = "2020-01-01") -> pd
 
 def test_approved_spy_entry_and_exit_preset_generation():
     entries = generate_approved_spy_entry_presets()
+    intraday_entries = generate_approved_spy_entry_presets("15m")
+    experimental_entries = generate_approved_spy_entry_presets("5m")
     exits = generate_approved_spy_exit_presets()
     assert len(entries) == 14
+    assert len(intraday_entries) == 4
+    assert len(experimental_entries) == 2
     assert len(exits) == 22
     assert all(entry.entry_strategy_name for entry in entries)
+    assert all(entry.timeframe == "15m" for entry in intraday_entries)
     assert "partial_take_profit_plus_trailing_stop" not in {exit_preset.exit_structure_key for exit_preset in exits}
 
 
@@ -160,12 +165,13 @@ def test_spy_search_result_output_shape_and_no_trade_handling(monkeypatch):
     exit_preset = SpySearchExitPreset("signal_only", "signal_exit_only", "Signal exit only", "Signal exit only", {}, "Signal exit only.")
     monkeypatch.setattr(
         "trading_lab.spy_lab.generate_spy_search_combinations",
-        lambda: [SpySearchCombination("only", entry, exit_preset)],
+        lambda timeframe="1d": [SpySearchCombination("only", entry, exit_preset)],
     )
     engine = BacktestEngine(database=None)
     payload, results, highlights = run_automated_spy_search(
         engine=engine,
         data_by_symbol={"SPY": make_bars("SPY", [100.0] * 30)},
+        timeframe="1d",
         start_date="2020-01-01",
         end_date="2020-03-01",
         price_mode="adjusted_price_mode",
@@ -176,6 +182,7 @@ def test_spy_search_result_output_shape_and_no_trade_handling(monkeypatch):
         commission_per_trade=0.0,
     )
     assert payload["total_combinations_tested"] == 1
+    assert payload["timeframe"] == "1d"
     assert set(results.columns) >= {"result_id", "entry_strategy_name", "exit_structure_name", "candidate_label", "summary_comment"}
     assert results.iloc[0]["candidate_label"] in {"Reject", "Not ready"}
     assert "Best Overall" in highlights
@@ -188,6 +195,7 @@ def test_spy_search_persistence_and_saved_retrieval(tmp_path: Path):
         "created_at": datetime.now(UTC).replace(tzinfo=None),
         "start_date": "2020-01-01",
         "end_date": "2024-01-01",
+        "timeframe": "1d",
         "price_mode": "adjusted_price_mode",
         "initial_capital": 100000.0,
         "slippage_pct": 0.0005,
@@ -204,6 +212,7 @@ def test_spy_search_persistence_and_saved_retrieval(tmp_path: Path):
             {
                 "result_id": "result-1",
                 "search_run_id": "search-1",
+                "timeframe": "1d",
                 "entry_strategy_name": "SPY 200-Day Trend Filter",
                 "entry_parameters_json": {"sma_length": 200},
                 "entry_preset_id": "trend_200",
@@ -278,6 +287,7 @@ def test_spy_search_promotion_linkage(tmp_path: Path):
         "created_at": datetime.now(UTC).replace(tzinfo=None),
         "start_date": "2020-01-01",
         "end_date": "2024-01-01",
+        "timeframe": "1d",
         "price_mode": "adjusted_price_mode",
         "initial_capital": 100000.0,
         "slippage_pct": 0.0,
@@ -294,6 +304,7 @@ def test_spy_search_promotion_linkage(tmp_path: Path):
             {
                 "result_id": "result-1",
                 "search_run_id": "search-1",
+                "timeframe": "1d",
                 "entry_strategy_name": "SPY 200-Day Trend Filter",
                 "entry_parameters_json": {"sma_length": 200},
                 "entry_preset_id": "trend_200",

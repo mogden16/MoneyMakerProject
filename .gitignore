@@ -12,7 +12,7 @@ venv/
 .env
 
 # App artifacts
-data/
+/data/
 exports/
 streamlit_stdout.log
 streamlit_stderr.log

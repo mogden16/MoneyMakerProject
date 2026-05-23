@@ -9,6 +9,7 @@ from trading_lab.paper.forward_engine import build_active_paper_strategy_payload
 from trading_lab.spy_lab import (
     build_spy_backtest_config,
     build_spy_robustness_checklist,
+    prepare_spy_timeframe_bars,
     build_spy_strategy,
     build_spy_workbench_config,
     get_spy_strategy_preset,
@@ -156,6 +157,7 @@ def test_spy_workbench_config_and_backtest_config_object():
     config = build_spy_workbench_config(
         preset_key="trend_filter_200",
         entry_parameters={"sma_length": 200},
+        timeframe="1d",
         exit_structure_key="fixed_stop_loss",
         exit_parameters={"stop_loss_pct": 0.08},
         start_date="2020-01-01",
@@ -180,6 +182,7 @@ def test_spy_exit_comparison_results():
     workbench = build_spy_workbench_config(
         preset_key="trend_filter_200",
         entry_parameters={"sma_length": 200},
+        timeframe="1d",
         exit_structure_key="signal_exit_only",
         exit_parameters={},
         start_date="2020-01-01",
@@ -270,3 +273,57 @@ def test_spy_profit_concentration_helper():
     )
     concentration = summarize_profit_concentration(trades)
     assert concentration["best_trade_profit_share"] > 0
+
+
+def test_prepare_spy_timeframe_bars_aligns_daily_regime_to_intraday():
+    daily_index = pd.date_range("2024-01-01", periods=220, freq="B")
+    daily_close = [100.0] * 205 + [210.0] * 15
+    daily = pd.DataFrame(
+        {
+            "source_vendor": ["test"] * len(daily_index),
+            "symbol": ["SPY"] * len(daily_index),
+            "timeframe": ["1d"] * len(daily_index),
+            "timestamp": daily_index,
+            "session_date": daily_index.date,
+            "open": daily_close,
+            "high": [value + 1.0 for value in daily_close],
+            "low": [value - 1.0 for value in daily_close],
+            "close": daily_close,
+            "adj_close": daily_close,
+            "volume": [1000.0] * len(daily_index),
+            "dividends": [0.0] * len(daily_index),
+            "stock_splits": [0.0] * len(daily_index),
+            "adjusted_flag": [True] * len(daily_index),
+            "retrieved_at": [pd.Timestamp("2024-10-16")] * len(daily_index),
+        }
+    )
+    intraday_timestamps = pd.to_datetime(
+        [
+            "2024-10-15 09:30",
+            "2024-10-15 09:45",
+            "2024-10-16 09:30",
+            "2024-10-16 09:45",
+        ]
+    )
+    intraday = pd.DataFrame(
+        {
+            "source_vendor": ["test"] * 4,
+            "symbol": ["SPY"] * 4,
+            "timeframe": ["15m"] * 4,
+            "timestamp": intraday_timestamps,
+            "session_date": intraday_timestamps.date,
+            "open": [100.0, 101.0, 102.0, 103.0],
+            "high": [101.0, 102.0, 103.0, 104.0],
+            "low": [99.0, 100.0, 101.0, 102.0],
+            "close": [100.5, 101.5, 102.5, 103.5],
+            "adj_close": [100.5, 101.5, 102.5, 103.5],
+            "volume": [1000.0] * 4,
+            "dividends": [0.0] * 4,
+            "stock_splits": [0.0] * 4,
+            "adjusted_flag": [True] * 4,
+            "retrieved_at": [pd.Timestamp("2024-10-16")] * 4,
+        }
+    )
+    prepared = prepare_spy_timeframe_bars(primary_bars=intraday, timeframe="15m", daily_bars=daily)
+    assert "daily_regime_bull" in prepared.columns
+    assert prepared["daily_regime_source_date"].notna().any()

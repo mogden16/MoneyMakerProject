@@ -54,7 +54,7 @@ def test_incremental_update_and_corporate_actions_are_persisted(tmp_path: Path, 
     provider = YFinanceDataProvider(database=db)
     download_calls: list[pd.Timestamp] = []
 
-    def fake_download(tickers, start, end, interval, auto_adjust, actions, progress):
+    def fake_download(tickers, start, end, interval, auto_adjust, actions, progress, prepost=False):
         download_calls.append(pd.Timestamp(start))
         frame = pd.DataFrame(
             {
@@ -87,7 +87,7 @@ def test_incremental_update_and_corporate_actions_are_persisted(tmp_path: Path, 
             actions.index.name = "Date"
             return actions
 
-    monkeypatch.setattr("trading_lab.data.providers.yfinance_provider.yf.download", fake_download)
+    monkeypatch.setattr("trading_lab.data.providers.yfinance_provider.yf.download", lambda **kwargs: fake_download(**kwargs))
     monkeypatch.setattr("trading_lab.data.providers.yfinance_provider.yf.Ticker", lambda symbol: FakeTicker())
 
     first = provider.get_stock_bars("AAPL", "2024-01-01", "2024-01-02")
@@ -140,3 +140,70 @@ def test_validate_stock_bars_distinguishes_holiday_from_missing_session():
     missing_frame.loc[1, "session_date"] = pd.Timestamp("2024-07-08").date()
     missing_result = validate_stock_bars(missing_frame, market_calendar=calendar, start_date="2024-07-03", end_date="2024-07-08")
     assert missing_result.warnings
+
+
+def test_intraday_range_clamp_and_regular_hours_filter(tmp_path: Path, monkeypatch):
+    db = TradingLabDatabase(str(tmp_path / "intraday.duckdb"))
+    provider = YFinanceDataProvider(database=db)
+
+    def fake_download(**kwargs):
+        index = pd.to_datetime(
+            [
+                "2024-05-20 08:00",
+                "2024-05-20 09:30",
+                "2024-05-20 09:45",
+                "2024-05-20 16:15",
+            ]
+        ).tz_localize("America/New_York")
+        frame = pd.DataFrame(
+            {
+                "Open": [10.0, 10.1, 10.2, 10.3],
+                "High": [10.2, 10.3, 10.4, 10.5],
+                "Low": [9.9, 10.0, 10.1, 10.2],
+                "Close": [10.1, 10.2, 10.3, 10.4],
+                "Adj Close": [10.1, 10.2, 10.3, 10.4],
+                "Volume": [100, 200, 300, 400],
+            },
+            index=index,
+        )
+        frame.index.name = "Datetime"
+        return frame
+
+    class FakeTicker:
+        fast_info = {}
+
+        @property
+        def actions(self):
+            empty = pd.DataFrame(columns=["Dividends", "Stock Splits"])
+            empty.index.name = "Date"
+            return empty
+
+    monkeypatch.setattr("trading_lab.data.providers.yfinance_provider.yf.download", fake_download)
+    monkeypatch.setattr("trading_lab.data.providers.yfinance_provider.yf.Ticker", lambda symbol: FakeTicker())
+
+    bars = provider.get_stock_bars("SPY", "2024-01-01", "2024-05-20", timeframe="15m")
+    assert len(bars) == 2
+    assert bars["timeframe"].eq("15m").all()
+    status = provider.get_last_fetch_status("SPY")
+    assert status is not None
+    assert any("clamped" in warning.lower() for warning in status.validation_warnings)
+
+
+def test_intraday_normalization_preserves_eastern_session_dates(tmp_path: Path):
+    db = TradingLabDatabase(str(tmp_path / "normalize_intraday.duckdb"))
+    provider = YFinanceDataProvider(database=db)
+    raw = pd.DataFrame(
+        {
+            "Open": [10.0, 10.1],
+            "High": [10.2, 10.3],
+            "Low": [9.9, 10.0],
+            "Close": [10.1, 10.2],
+            "Adj Close": [10.1, 10.2],
+            "Volume": [100, 200],
+        },
+        index=pd.to_datetime(["2024-05-20 09:30", "2024-05-20 09:45"]).tz_localize("America/New_York"),
+    )
+    raw.index.name = "Datetime"
+    result = provider._normalize_download("SPY", "15m", raw)
+    assert result["timestamp"].dt.tz is None
+    assert result["session_date"].nunique() == 1

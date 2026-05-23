@@ -28,6 +28,9 @@ class BacktestConfig(BaseModel):
     return_mode: str = "price_return_only"
     price_mode: str = "raw_price_mode"
     sweep_id: str | None = None
+    timeframe: str = "1d"
+    end_of_day_exit: bool = False
+    allow_overnight: bool = True
 
 
 @dataclass
@@ -91,6 +94,18 @@ class BacktestEngine:
                             commission=config.commission_per_trade,
                             trades=trades,
                             exit_reason=risk_exit.exit_reason,
+                            run_id=run_id,
+                        )
+                        continue
+                    if config.timeframe != "1d" and config.end_of_day_exit and not config.allow_overnight and self._is_session_end(current_ts, all_timestamps, date_idx):
+                        self._close_position(
+                            portfolio=portfolio,
+                            symbol=symbol,
+                            exit_timestamp=current_ts,
+                            exit_price=apply_slippage(float(bar["close"]), config.slippage_pct, "sell"),
+                            commission=config.commission_per_trade,
+                            trades=trades,
+                            exit_reason="end_of_day_exit",
                             run_id=run_id,
                         )
                         continue
@@ -304,7 +319,7 @@ class BacktestEngine:
             "end_date": max(pd.to_datetime(frame["session_date"]).max().date() for frame in data_by_symbol.values()),
             "created_at": pd.Timestamp.now("UTC").tz_localize(None),
             "initial_capital": config.initial_capital,
-            "timeframe": "1d",
+            "timeframe": config.timeframe,
             "total_return": metrics.get("Total Return", 0.0),
             "cagr": metrics.get("CAGR", 0.0),
             "max_drawdown": metrics.get("Max Drawdown", 0.0),
@@ -335,3 +350,8 @@ class BacktestEngine:
             stored = benchmark_curve.copy()
             stored["run_id"] = run_id
             self.database.insert_backtest_benchmark_curve(stored)
+
+    def _is_session_end(self, current_ts: pd.Timestamp, all_timestamps: list[pd.Timestamp], date_idx: int) -> bool:
+        if date_idx >= len(all_timestamps) - 1:
+            return True
+        return pd.Timestamp(all_timestamps[date_idx + 1]).date() != pd.Timestamp(current_ts).date()
