@@ -633,25 +633,30 @@ def render_saved_run_detail(db: TradingLabDatabase, run_id: str, *, editor_prefi
     )
 
 
-def render_saved_backtests(db: TradingLabDatabase) -> None:
+def render_saved_backtests(db: TradingLabDatabase, *, key_prefix: str = "saved_backtests") -> None:
     st.header("Saved Backtests")
-    filter_tag = st.text_input("Filter saved runs by tag", value="", key="saved_runs_tag_filter")
+    filter_tag = st.text_input("Filter saved runs by tag", value="", key=f"{key_prefix}_saved_runs_tag_filter")
     saved_runs = db.list_backtest_runs(limit=100, tag=filter_tag or None)
     if saved_runs.empty:
         st.info("No saved backtests found yet.")
         return
     st.dataframe(saved_runs, use_container_width=True)
-    selected_run_id = st.selectbox("Select saved run", saved_runs["run_id"].tolist(), key="saved_run_select")
-    render_saved_run_detail(db, selected_run_id, editor_prefix="saved_run")
+    selected_run_id = st.selectbox("Select saved run", saved_runs["run_id"].tolist(), key=f"{key_prefix}_saved_run_select")
+    render_saved_run_detail(db, selected_run_id, editor_prefix=f"{key_prefix}_saved_run")
 
 
-def render_compare_backtests(db: TradingLabDatabase) -> None:
+def render_compare_backtests(db: TradingLabDatabase, *, key_prefix: str = "compare_backtests") -> None:
     st.header("Compare Backtests")
     saved_runs = db.list_backtest_runs(limit=100)
     if saved_runs.empty:
         st.info("No saved backtests available for comparison yet.")
         return
-    selected_runs = st.multiselect("Select runs to compare", saved_runs["run_id"].tolist(), default=saved_runs["run_id"].head(2).tolist())
+    selected_runs = st.multiselect(
+        "Select runs to compare",
+        saved_runs["run_id"].tolist(),
+        default=saved_runs["run_id"].head(2).tolist(),
+        key=f"{key_prefix}_selected_runs",
+    )
     if not selected_runs:
         st.info("Select at least one run.")
         return
@@ -701,20 +706,26 @@ def render_compare_backtests(db: TradingLabDatabase) -> None:
     curves = {run_id: db.read_backtest_equity_curve(run_id) for run_id in selected_runs}
     st.plotly_chart(build_multi_equity_chart(curves), use_container_width=True)
     st.plotly_chart(build_multi_drawdown_chart(curves), use_container_width=True)
-    selected_run_for_diag = st.selectbox("Show benchmark diagnostics for", selected_runs, key="compare_diag_run")
+    selected_run_for_diag = st.selectbox("Show benchmark diagnostics for", selected_runs, key=f"{key_prefix}_compare_diag_run")
     render_benchmark_diagnostics(db.read_benchmark_diagnostics(selected_run_for_diag))
-    st.download_button("Export comparison CSV", data=comparison.to_csv(index=False).encode("utf-8"), file_name="backtest_comparison.csv", mime="text/csv")
+    st.download_button(
+        "Export comparison CSV",
+        data=comparison.to_csv(index=False).encode("utf-8"),
+        file_name="backtest_comparison.csv",
+        mime="text/csv",
+        key=f"{key_prefix}_comparison_export",
+    )
 
 
-def render_saved_sweeps(db: TradingLabDatabase) -> None:
+def render_saved_sweeps(db: TradingLabDatabase, *, key_prefix: str = "saved_sweeps") -> None:
     st.subheader("Saved Sweeps")
-    tag_filter = st.text_input("Filter sweeps by tag", value="", key="saved_sweeps_tag_filter")
+    tag_filter = st.text_input("Filter sweeps by tag", value="", key=f"{key_prefix}_saved_sweeps_tag_filter")
     saved_sweeps = db.list_sweep_runs(limit=100, tag=tag_filter or None)
     if saved_sweeps.empty:
         st.info("No saved sweeps found yet.")
         return
     st.dataframe(saved_sweeps, use_container_width=True)
-    selected_sweep_id = st.selectbox("Select saved sweep", saved_sweeps["sweep_id"].tolist(), key="saved_sweep_select")
+    selected_sweep_id = st.selectbox("Select saved sweep", saved_sweeps["sweep_id"].tolist(), key=f"{key_prefix}_saved_sweep_select")
     selected_sweep = db.get_sweep_run(selected_sweep_id)
     if selected_sweep is None:
         st.warning("Selected sweep could not be loaded.")
@@ -722,9 +733,9 @@ def render_saved_sweeps(db: TradingLabDatabase) -> None:
     results = db.read_sweep_results(selected_sweep_id)
     parameters = db.read_sweep_parameters(selected_sweep_id)
     st.json(selected_sweep, expanded=False)
-    notes_value = st.text_area("Sweep Notes", value=selected_sweep.get("notes") or "", key="saved_sweep_notes")
-    tags_value = st.text_input("Sweep Tags", value=selected_sweep.get("tags") or "", key="saved_sweep_tags")
-    if st.button("Save Sweep Notes/Tags", key="saved_sweep_annotations"):
+    notes_value = st.text_area("Sweep Notes", value=selected_sweep.get("notes") or "", key=f"{key_prefix}_saved_sweep_notes")
+    tags_value = st.text_input("Sweep Tags", value=selected_sweep.get("tags") or "", key=f"{key_prefix}_saved_sweep_tags")
+    if st.button("Save Sweep Notes/Tags", key=f"{key_prefix}_saved_sweep_annotations"):
         db.update_sweep_annotations(selected_sweep_id, notes_value, tags_value)
         st.success("Sweep notes and tags updated.")
     if not parameters.empty:
@@ -735,14 +746,20 @@ def render_saved_sweeps(db: TradingLabDatabase) -> None:
         return
     st.subheader("Sweep Results")
     st.dataframe(results, use_container_width=True)
-    selected_result_id = st.selectbox("Select sweep result", results["sweep_result_id"].tolist(), key="saved_sweep_result_select")
+    selected_result_id = st.selectbox("Select sweep result", results["sweep_result_id"].tolist(), key=f"{key_prefix}_saved_sweep_result_select")
     selected_result = results.loc[results["sweep_result_id"] == selected_result_id].iloc[0]
     linked_run_id = selected_result.get("backtest_run_id")
     if linked_run_id:
         st.write(f"Linked Backtest Run: `{linked_run_id}`")
-        if st.checkbox("Show linked backtest details", key="show_linked_run"):
-            render_saved_run_detail(db, linked_run_id, editor_prefix="linked_run")
-    st.download_button("Export sweep results CSV", data=results.to_csv(index=False).encode("utf-8"), file_name=f"{selected_sweep_id}_sweep_results.csv", mime="text/csv")
+        if st.checkbox("Show linked backtest details", key=f"{key_prefix}_show_linked_run"):
+            render_saved_run_detail(db, linked_run_id, editor_prefix=f"{key_prefix}_linked_run")
+    st.download_button(
+        "Export sweep results CSV",
+        data=results.to_csv(index=False).encode("utf-8"),
+        file_name=f"{selected_sweep_id}_sweep_results.csv",
+        mime="text/csv",
+        key=f"{key_prefix}_sweep_results_export",
+    )
 
 
 def build_strategy_sweep_stability(db: TradingLabDatabase) -> pd.DataFrame:
@@ -849,22 +866,22 @@ def run_strategy_qualification(
     }
 
 
-def render_saved_qualification_runs(db: TradingLabDatabase) -> None:
+def render_saved_qualification_runs(db: TradingLabDatabase, *, key_prefix: str = "saved_qualifications") -> None:
     st.subheader("Saved Qualification Runs")
-    tag_filter = st.text_input("Filter qualifications by tag", value="", key="qualification_tag_filter")
+    tag_filter = st.text_input("Filter qualifications by tag", value="", key=f"{key_prefix}_qualification_tag_filter")
     qualifications = db.list_strategy_qualification_runs(limit=100, tag=tag_filter or None)
     if qualifications.empty:
         st.info("No saved strategy qualification runs are available yet.")
         return
     st.dataframe(qualifications, use_container_width=True)
-    selected_id = st.selectbox("Select saved qualification", qualifications["qualification_id"].tolist(), key="qualification_select")
+    selected_id = st.selectbox("Select saved qualification", qualifications["qualification_id"].tolist(), key=f"{key_prefix}_qualification_select")
     selected = db.get_strategy_qualification_run(selected_id)
     if selected is None:
         st.warning("Selected qualification could not be loaded.")
         return
-    notes_value = st.text_area("Qualification Notes", value=selected.get("notes") or "", key="qualification_notes")
-    tags_value = st.text_input("Qualification Tags", value=selected.get("tags") or "", key="qualification_tags")
-    if st.button("Save Qualification Notes/Tags", key="qualification_annotations"):
+    notes_value = st.text_area("Qualification Notes", value=selected.get("notes") or "", key=f"{key_prefix}_qualification_notes")
+    tags_value = st.text_input("Qualification Tags", value=selected.get("tags") or "", key=f"{key_prefix}_qualification_tags")
+    if st.button("Save Qualification Notes/Tags", key=f"{key_prefix}_qualification_annotations"):
         db.update_strategy_qualification_annotations(selected_id, notes_value, tags_value)
         st.success("Qualification notes and tags updated.")
     st.json(selected, expanded=False)
@@ -873,7 +890,7 @@ def render_saved_qualification_runs(db: TradingLabDatabase) -> None:
         st.info("This qualification has no saved strategy results.")
         return
     st.dataframe(results, use_container_width=True)
-    selected_result_id = st.selectbox("Select qualification result", results["qualification_result_id"].tolist(), key="qualification_result_select")
+    selected_result_id = st.selectbox("Select qualification result", results["qualification_result_id"].tolist(), key=f"{key_prefix}_qualification_result_select")
     selected_result = results.loc[results["qualification_result_id"] == selected_result_id].iloc[0]
     bullets = safe_json_loads(selected_result.get("candidate_explanation_json"), [])
     if bullets:
@@ -881,13 +898,14 @@ def render_saved_qualification_runs(db: TradingLabDatabase) -> None:
         for bullet in bullets:
             st.write(f"- {bullet}")
     linked_run_id = selected_result.get("backtest_run_id")
-    if linked_run_id and st.checkbox("Show linked backtest details", key="qualification_show_run"):
-        render_saved_run_detail(db, str(linked_run_id), editor_prefix="qualification_linked_run")
+    if linked_run_id and st.checkbox("Show linked backtest details", key=f"{key_prefix}_qualification_show_run"):
+        render_saved_run_detail(db, str(linked_run_id), editor_prefix=f"{key_prefix}_qualification_linked_run")
     st.download_button(
         "Export qualification results CSV",
         data=results.to_csv(index=False).encode("utf-8"),
         file_name=f"{selected_id}_qualification_results.csv",
         mime="text/csv",
+        key=f"{key_prefix}_qualification_export",
     )
 
 
@@ -1542,7 +1560,7 @@ def render_strategy_qualification(
     default_tickers: list[str],
 ) -> None:
     st.header("Strategy Qualification")
-    render_saved_qualification_runs(db)
+    render_saved_qualification_runs(db, key_prefix="qualification_saved_runs")
     st.divider()
     universe_name = st.selectbox("Universe", list_universe_names(), index=1, key="qualification_universe")
     universe_tickers = get_universe_tickers(universe_name)
@@ -3141,11 +3159,11 @@ def render_research_history_workspace(
     st.subheader("B. Saved SPY Sessions")
     st.info("Dedicated SPY session objects are not persisted yet. Use saved SPY searches, saved backtests, and active forward-paper strategies as the current session trail.")
     with st.expander("C. Saved Backtests", expanded=False):
-        render_saved_backtests(db)
+        render_saved_backtests(db, key_prefix="history_saved_backtests")
     with st.expander("D. Saved Sweeps", expanded=False):
-        render_saved_sweeps(db)
+        render_saved_sweeps(db, key_prefix="history_saved_sweeps")
     with st.expander("E. Strategy Qualification Results", expanded=False):
-        render_saved_qualification_runs(db)
+        render_saved_qualification_runs(db, key_prefix="history_saved_qualifications")
     with st.expander("F. Walk-Forward Results", expanded=False):
         st.info("Walk-forward summaries are attached to saved runs. Open a saved backtest to inspect linked walk-forward results.")
     with st.expander("G. Train/Test Results", expanded=False):
@@ -3160,7 +3178,7 @@ def render_research_history_workspace(
         with st.expander("Advanced Research Dashboard", expanded=False):
             render_research_dashboard(db)
         with st.expander("Advanced Compare Backtests", expanded=False):
-            render_compare_backtests(db)
+            render_compare_backtests(db, key_prefix="history_compare_backtests")
         with st.expander("Advanced Scanner History", expanded=False):
             render_scanner_history(db)
         with st.expander("Legacy Multi-Ticker Research", expanded=False):
