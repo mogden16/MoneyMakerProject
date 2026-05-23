@@ -1,0 +1,16 @@
+app:
+  name: Personal Trading Lab
+  benchmark_symbol: SPY
+data:
+  default_timeframe: 1d
+  db_path: data/trading_lab.duckdb
+  cache_max_age_hours: 24
+  force_refresh_default: false
+  allow_stale_cache: false
+backtest:
+  default_initial_capital: 100000
+  default_slippage_pct: 0.0005
+  default_commission_per_trade: 1.0
+  default_position_sizing: percent_of_portfolio
+  default_position_size_value: 0.1
+  default_max_positions: 5
