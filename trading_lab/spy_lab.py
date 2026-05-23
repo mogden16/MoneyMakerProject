@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from trading_lab.backtest.engine import BacktestConfig
+from trading_lab.backtest.engine import BacktestConfig, BacktestEngine
 from trading_lab.backtest.qualification import summarize_slippage_warnings
 from trading_lab.backtest.robustness import compute_robustness_score, parameter_stability_summary, profit_concentration_analysis
 from trading_lab.backtest.sweep import run_parameter_sweep
@@ -812,13 +812,19 @@ def run_automated_spy_search(
     position_sizing_value: float,
     slippage_pct: float,
     commission_per_trade: float,
+    persist_backtest_runs: bool = False,
     progress_callback=None,
 ) -> tuple[dict[str, Any], pd.DataFrame, dict[str, dict[str, Any]]]:
-    """Run the controlled automated SPY search across approved entry and exit permutations."""
+    """Run the controlled automated SPY search across approved entry and exit permutations.
+
+    By default this runs ephemerally and persists only the search summary rows.
+    That avoids writing hundreds of full backtest payloads into DuckDB for one search run.
+    """
     combinations = generate_spy_search_combinations()
     search_run_id = str(uuid4())
     rows: list[dict[str, Any]] = []
     total = len(combinations)
+    search_engine = engine if persist_backtest_runs else BacktestEngine(database=None)
     for idx, combination in enumerate(combinations, start=1):
         workbench = build_spy_workbench_config(
             preset_key=combination.entry_preset.preset_key,
@@ -837,7 +843,7 @@ def run_automated_spy_search(
         )
         strategy = apply_spy_exit_structure(build_spy_strategy(workbench.preset_key, workbench.entry_parameters), workbench)
         config = build_spy_backtest_config(workbench)
-        result = engine.run(data_by_symbol={"SPY": data_by_symbol["SPY"]}, strategy=strategy, config=config, benchmark_symbol="SPY")
+        result = search_engine.run(data_by_symbol={"SPY": data_by_symbol["SPY"]}, strategy=strategy, config=config, benchmark_symbol="SPY")
         concentration = summarize_profit_concentration(result.trade_log)
         robustness = compute_robustness_score(result.metrics, concentration=concentration)
         avg_r_multiple = average_r_multiple(result.trade_log, workbench.exit_parameters)
@@ -860,7 +866,7 @@ def run_automated_spy_search(
             "exit_parameters_json": combination.exit_preset.parameters,
             "exit_preset_id": combination.exit_preset.exit_preset_id,
             "exit_preset_label": combination.exit_preset.label,
-            "backtest_run_id": result.run_id,
+            "backtest_run_id": result.run_id if persist_backtest_runs else None,
             "total_return": float(result.metrics.get("Total Return", 0.0) or 0.0),
             "cagr": float(result.metrics.get("CAGR", 0.0) or 0.0),
             "spy_cagr": float(summary["Buy-and-Hold SPY CAGR"]),

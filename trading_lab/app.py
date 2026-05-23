@@ -2154,6 +2154,7 @@ def render_spy_strategy_lab(
                 position_sizing_value=workbench.position_size_value,
                 slippage_pct=workbench.slippage_pct,
                 commission_per_trade=workbench.commission_per_trade,
+                persist_backtest_runs=False,
                 progress_callback=_progress_callback,
             )
             payload["notes"] = search_notes
@@ -2335,7 +2336,7 @@ def render_spy_strategy_lab(
                         risk_settings={**selected_result["exit_parameters_json"], "fill_rule": "next_open", "same_bar_stop_target_rule": "conservative_stop_first", "exit_structure_key": selected_result["exit_structure_key"], "exit_structure_name": selected_result["exit_structure_name"]},
                         slippage_pct=workbench.slippage_pct,
                         commission_per_trade=workbench.commission_per_trade,
-                        linked_backtest_run_id=str(selected_result["backtest_run_id"]),
+                        linked_backtest_run_id=str(selected_result["backtest_run_id"]) if pd.notna(selected_result["backtest_run_id"]) and selected_result["backtest_run_id"] else None,
                         linked_search_run_id=str(payload["search_run_id"]),
                         linked_search_result_id=str(selected_result["result_id"]),
                         activation_reason=f"Promoted from automated SPY search: {selected_result['entry_preset_label']} with {selected_result['exit_preset_label']}.",
