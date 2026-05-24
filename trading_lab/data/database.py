@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager, suppress
+from threading import RLock
 from typing import Any
 
 import duckdb
@@ -12,12 +14,41 @@ from trading_lab.data.cache import ensure_parent_dir
 class TradingLabDatabase:
     """DuckDB persistence layer for market data, backtests, and research outputs."""
 
+    _shared_connections: dict[str, duckdb.DuckDBPyConnection] = {}
+    _shared_connection_locks: dict[str, RLock] = {}
+    _registry_lock = RLock()
+
     def __init__(self, db_path: str = "data/trading_lab.duckdb") -> None:
         self.db_path = str(ensure_parent_dir(db_path))
         self._initialize()
 
+    @classmethod
+    def _get_shared_connection(cls, db_path: str) -> tuple[duckdb.DuckDBPyConnection, RLock]:
+        with cls._registry_lock:
+            lock = cls._shared_connection_locks.setdefault(db_path, RLock())
+            connection = cls._shared_connections.get(db_path)
+            if connection is None:
+                connection = duckdb.connect(db_path)
+                cls._shared_connections[db_path] = connection
+            return connection, lock
+
+    @contextmanager
     def connect(self):
-        return duckdb.connect(self.db_path)
+        conn, lock = self._get_shared_connection(self.db_path)
+        lock.acquire()
+        try:
+            yield conn
+        finally:
+            lock.release()
+
+    @classmethod
+    def close_shared_connection(cls, db_path: str) -> None:
+        with cls._registry_lock:
+            connection = cls._shared_connections.pop(db_path, None)
+            cls._shared_connection_locks.pop(db_path, None)
+        if connection is not None:
+            with suppress(Exception):
+                connection.close()
 
     def _initialize(self) -> None:
         with self.connect() as conn:
