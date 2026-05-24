@@ -35,6 +35,7 @@ from trading_lab.data.universes import get_universe_tickers, list_universe_names
 from trading_lab.indicators.hma import hull_moving_average
 from trading_lab.indicators.qqe import qqe_indicator
 from trading_lab.indicators.rsi import relative_strength_index
+from trading_lab.market_regime import build_market_regime_report
 from trading_lab.paper.analytics import closed_trade_analytics
 from trading_lab.paper.forward_engine import (
     ForwardPaperEngine,
@@ -102,7 +103,7 @@ SESSION_SPY_LAB_STABILITY_KEY = "ptl_spy_lab_stability"
 SESSION_SPY_LAB_ROBUSTNESS_KEY = "ptl_spy_lab_robustness"
 SESSION_SPY_LAB_EXIT_KEY = "ptl_spy_lab_exit_comparison"
 SESSION_SPY_SEARCH_KEY = "ptl_spy_search_state"
-PRIMARY_TAB_LABELS = ["SPY Workbench", "Forward Paper", "Research History", "Data & Settings"]
+PRIMARY_TAB_LABELS = ["SPY Workbench", "Forward Paper", "Research History", "Market Regime Report", "Data & Settings"]
 
 
 def default_show_advanced_tools() -> bool:
@@ -3334,6 +3335,174 @@ def render_data_settings_workspace(
             render_data_health(statuses, warnings, current_research)
 
 
+def _format_report_percent(value: Any) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "Not available"
+    return f"{float(value):.2%}"
+
+
+def _format_report_number(value: Any, decimals: int = 2) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "Not available"
+    return f"{float(value):,.{decimals}f}"
+
+
+def _caption_source(label: str, detail: str) -> str:
+    return f"Source: {label} | {detail}"
+
+
+def render_market_regime_workspace(
+    *,
+    provider: YFinanceDataProvider,
+    start_date: str,
+    end_date: str,
+    refresh_data: bool,
+) -> None:
+    st.header("Market Regime Report")
+    st.caption("Research-only market context dashboard. This tab does not place trades or change the backtesting workflow.")
+    refresh_report = st.button("Refresh Market Regime Report", key="market_regime_refresh")
+    report = build_market_regime_report(
+        provider,
+        start_date=start_date,
+        end_date=end_date,
+        refresh_data=refresh_data or refresh_report,
+        as_of_date=pd.Timestamp(end_date).date(),
+    )
+
+    if report.warnings:
+        for warning in report.warnings:
+            st.warning(warning)
+    if any(
+        section.source.is_demo
+        for section in [
+            report.index_momentum,
+            report.breadth,
+            report.options_positioning,
+            report.sector_leadership,
+            report.seasonality,
+            report.macro_calendar,
+            report.earnings_watch,
+        ]
+    ):
+        st.info("One or more sections are using demo placeholder data. The labels below show which sections are live, cached, or demo-backed.")
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("Regime", report.summary.regime_label)
+    summary_cols[1].metric("Trend", report.summary.trend_direction)
+    summary_cols[2].metric("Posture", report.summary.recommended_posture)
+    summary_cols[3].metric("Score", report.summary.total_score)
+    st.caption(f"Last updated: {report.generated_at}")
+    st.write(report.summary.short_summary)
+
+    with st.container(border=True):
+        st.subheader("Analyst Summary")
+        st.write(report.analyst_summary)
+
+    score_frame = pd.DataFrame(
+        [
+            {
+                "component": component.name,
+                "score": component.score,
+                "active": component.active,
+                "rationale": component.rationale,
+            }
+            for component in report.summary.components
+        ]
+    )
+    with st.container(border=True):
+        st.subheader("Scoring Model")
+        st.caption("Auditable first-pass score from -2 to +2 by component. Options positioning only contributes when real data is connected.")
+        st.dataframe(score_frame, use_container_width=True, hide_index=True)
+
+    index_frame = pd.DataFrame(report.index_momentum.rows)
+    with st.container(border=True):
+        st.subheader("Index Momentum")
+        st.caption(_caption_source(report.index_momentum.source.label, report.index_momentum.source.detail))
+        if index_frame.empty:
+            st.info("Index momentum data is not available.")
+        else:
+            display = index_frame.copy()
+            for column in ["return_5d", "return_20d", "distance_50dma", "distance_200dma", "realized_vol_20d"]:
+                display[column] = display[column].map(_format_report_percent)
+            display["rsi_14"] = display["rsi_14"].map(lambda value: _format_report_number(value, 1))
+            display["overextended_flag"] = display["overextended_flag"].map(lambda value: "Yes" if value else "")
+            st.dataframe(display, use_container_width=True, hide_index=True)
+            normalized = []
+            for row in report.index_momentum.rows:
+                symbol = str(row["symbol"])
+                frame = provider.database.read_stock_bars(symbol=symbol, start_date=start_date, end_date=end_date, timeframe="1d")
+                if frame.empty:
+                    continue
+                close_series = indicator_price_series(frame.sort_values("timestamp"), "adjusted_price_mode")
+                if close_series.empty or float(close_series.iloc[0]) == 0.0:
+                    continue
+                normalized.append(pd.DataFrame({"timestamp": pd.to_datetime(frame["timestamp"]), "symbol": symbol, "normalized": close_series / float(close_series.iloc[0])}))
+            if normalized:
+                chart_frame = pd.concat(normalized, ignore_index=True)
+                st.plotly_chart(px.line(chart_frame, x="timestamp", y="normalized", color="symbol", title="Normalized Performance"), use_container_width=True)
+
+    breadth_frame = pd.DataFrame(report.breadth.rows)
+    with st.container(border=True):
+        st.subheader("Breadth")
+        st.caption(_caption_source(report.breadth.source.label, report.breadth.source.detail))
+        if not breadth_frame.empty:
+            display = breadth_frame.copy()
+            for column in ["pct_above_20dma", "pct_above_50dma", "pct_above_200dma"]:
+                display[column] = display[column].map(lambda value: "Not available" if value is None else f"{float(value):.1f}%")
+            st.dataframe(display, use_container_width=True, hide_index=True)
+        else:
+            st.info("Breadth data is not available yet.")
+        for note in report.breadth.notes:
+            st.write(f"- {note}")
+
+    options_frame = pd.DataFrame(report.options_positioning.rows)
+    with st.container(border=True):
+        st.subheader("Options / Dealer Positioning")
+        st.caption(_caption_source(report.options_positioning.source.label, report.options_positioning.source.detail))
+        if not options_frame.empty:
+            display = options_frame.copy()
+            if "historical_percentile" in display.columns:
+                display["historical_percentile"] = display["historical_percentile"].map(lambda value: f"{float(value):.1f}%" if value is not None else "Not available")
+            st.dataframe(display, use_container_width=True, hide_index=True)
+        else:
+            st.info("Options positioning data is not available yet.")
+        for note in report.options_positioning.notes:
+            st.write(f"- {note}")
+
+    sector_frame = pd.DataFrame(report.sector_leadership.rows)
+    with st.container(border=True):
+        st.subheader("Sector / Leadership")
+        st.caption(_caption_source(report.sector_leadership.source.label, report.sector_leadership.source.detail))
+        if sector_frame.empty:
+            st.info("Sector leadership data is not available.")
+        else:
+            display = sector_frame.copy()
+            for column in ["return_1w", "return_1m", "distance_50dma", "relative_strength_vs_spy"]:
+                display[column] = display[column].map(_format_report_percent)
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+    seasonality_frame = pd.DataFrame(report.seasonality.rows)
+    with st.container(border=True):
+        st.subheader("Seasonality")
+        st.caption(_caption_source(report.seasonality.source.label, report.seasonality.source.detail))
+        if seasonality_frame.empty:
+            st.info("Seasonality calculations are not available.")
+        else:
+            display = seasonality_frame.copy()
+            display["value"] = display["value"].map(_format_report_percent)
+            st.dataframe(display, use_container_width=True, hide_index=True)
+
+    with st.container(border=True):
+        st.subheader("Macro Calendar")
+        st.caption(_caption_source(report.macro_calendar.source.label, report.macro_calendar.source.detail))
+        st.dataframe(pd.DataFrame(report.macro_calendar.rows), use_container_width=True, hide_index=True)
+
+    with st.container(border=True):
+        st.subheader("Earnings Watch")
+        st.caption(_caption_source(report.earnings_watch.source.label, report.earnings_watch.source.detail))
+        st.dataframe(pd.DataFrame(report.earnings_watch.rows), use_container_width=True, hide_index=True)
+
+
 def main() -> None:
     load_dotenv()
     settings = load_settings()
@@ -3469,7 +3638,7 @@ def main() -> None:
     current_meta = st.session_state.get(SESSION_META_KEY, {})
 
     tabs = st.tabs(get_primary_tab_labels())
-    tab_spy_workbench, tab_forward, tab_history, tab_data = tabs
+    tab_spy_workbench, tab_forward, tab_history, tab_market_regime, tab_data = tabs
 
     with tab_spy_workbench:
         render_spy_strategy_lab(
@@ -3521,6 +3690,14 @@ def main() -> None:
             current_data=current_data,
             current_research=current_research,
             show_advanced_tools=show_advanced_tools,
+        )
+
+    with tab_market_regime:
+        render_market_regime_workspace(
+            provider=provider,
+            start_date=str(start_date),
+            end_date=str(end_date),
+            refresh_data=refresh_data,
         )
 
     with tab_data:
