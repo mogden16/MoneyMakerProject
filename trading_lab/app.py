@@ -8,9 +8,11 @@ from uuid import uuid4
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 import yaml
 from dotenv import load_dotenv
+from plotly.subplots import make_subplots
 
 from trading_lab.backtest.audit import generate_audit_findings
 from trading_lab.backtest.benchmark import BenchmarkDiagnostics, evaluate_benchmark_diagnostics
@@ -46,6 +48,11 @@ from trading_lab.paper.forward_engine import (
     parse_strategy_parameters,
 )
 from trading_lab.paper.journal import close_paper_trade_payload, create_paper_trade_payload, open_paper_trade_payload, update_post_trade_review
+from trading_lab.pybroker_lab import PyBrokerLabConfig, run_pybroker_lab
+from trading_lab.pybroker_lab.audit import build_chart_metadata, build_raw_bars_export_name
+from trading_lab.pybroker_lab.runner import PyBrokerRunResult, strategy_registry
+from trading_lab.pybroker_lab.parity import CandleComparisonResult, compare_candle_frames, parse_tradingview_csv
+from trading_lab.pybroker_lab.strategy_registry import fixed_strategy_library
 from trading_lab.reports.charts import build_drawdown_chart, build_equity_chart, build_multi_drawdown_chart, build_multi_equity_chart
 from trading_lab.signals.scanner import plan_trade_from_signal, scan_symbol_strategy
 from trading_lab.spy_lab import (
@@ -103,7 +110,8 @@ SESSION_SPY_LAB_STABILITY_KEY = "ptl_spy_lab_stability"
 SESSION_SPY_LAB_ROBUSTNESS_KEY = "ptl_spy_lab_robustness"
 SESSION_SPY_LAB_EXIT_KEY = "ptl_spy_lab_exit_comparison"
 SESSION_SPY_SEARCH_KEY = "ptl_spy_search_state"
-PRIMARY_TAB_LABELS = ["SPY Workbench", "Forward Paper", "Research History", "Market Regime Report", "Data & Settings"]
+SESSION_PYBROKER_LAB_KEY = "ptl_pybroker_lab_state"
+PRIMARY_TAB_LABELS = ["SPY Workbench", "PyBroker Lab", "Forward Paper", "Research History", "Market Regime Report", "Data & Settings"]
 
 
 def default_show_advanced_tools() -> bool:
@@ -237,6 +245,685 @@ def collect_data(
             statuses.append(status)
             validation_warnings.extend([f"{symbol}: {warning}" for warning in status.validation_warnings])
     return data_by_symbol, statuses, validation_warnings
+
+
+def collect_pybroker_data(
+    provider: YFinanceDataProvider,
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    refresh_data: bool,
+    timeframe: str,
+) -> tuple[pd.DataFrame, list[CacheStatus], list[str]]:
+    data_by_symbol, statuses, validation_warnings = collect_data(
+        provider,
+        symbols,
+        start_date,
+        end_date,
+        refresh_data,
+        benchmark_symbol=None,
+        timeframe=timeframe,
+    )
+    frames = [bars.copy() for bars in data_by_symbol.values() if not bars.empty]
+    if not frames:
+        return pd.DataFrame(), statuses, validation_warnings
+    combined = pd.concat(frames, ignore_index=True)
+    return combined, statuses, validation_warnings
+
+
+def pybroker_strategy_labels() -> dict[str, str]:
+    labels = {"all": "All default strategies"}
+    labels.update({strategy_id: template.display_name for strategy_id, template in fixed_strategy_library().items()})
+    return labels
+
+
+def render_pybroker_strategy_description(strategy_name: str) -> None:
+    if strategy_name == "all":
+        st.info("This runs the full fixed strategy library with hard-coded defaults. Indicator settings remain in code and are not editable in the app.")
+        return
+    template = fixed_strategy_library()[strategy_name]
+    with st.container(border=True):
+        st.subheader(template.display_name)
+        st.write(template.description)
+        st.caption("Fixed logic and indicator settings remain hard-coded in the codebase. The UI only exposes strategy selection, data range, benchmark, and backtest-level execution controls.")
+
+
+def render_pybroker_run_result(state: dict[str, Any]) -> None:
+    result: PyBrokerRunResult = state["result"]
+    summary = result.summary
+    if summary.empty:
+        st.info("No PyBroker result is loaded yet.")
+        return
+    st.success(f"PyBroker run completed. Output folder: `{state['output_dir']}`")
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Strategies run", int(summary["strategy_name"].nunique()))
+    metric_cols[1].metric("PASS count", int(summary["status"].eq("PASS").sum()))
+    metric_cols[2].metric("FAIL count", int(summary["status"].eq("FAIL").sum()))
+    metric_cols[3].metric("Date range", f"{state['config']['start_date']} to {state['config']['end_date']}")
+    st.subheader("Actual Data Used")
+    if result.actual_data_used.empty:
+        st.info("No actual-data rows were recorded for this run.")
+    else:
+        st.dataframe(result.actual_data_used, use_container_width=True, hide_index=True)
+    if result.data_quality_audits:
+        st.subheader("Data Audit")
+        for strategy_id, audit_frame in result.data_quality_audits.items():
+            with st.expander(f"{fixed_strategy_library()[strategy_id].display_name} Data Audit", expanded=False):
+                st.dataframe(audit_frame, use_container_width=True, hide_index=True)
+
+    st.subheader("Summary")
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+    if not result.benchmark_summary.empty:
+        st.subheader("Benchmark Comparison")
+        st.dataframe(result.benchmark_summary, use_container_width=True, hide_index=True)
+    st.subheader("Strategy Metrics")
+    st.dataframe(result.strategy_metrics, use_container_width=True, hide_index=True)
+    st.subheader("Benchmark Metrics")
+    st.dataframe(result.benchmark_metrics, use_container_width=True, hide_index=True)
+    if not result.equity_curve.empty:
+        chart_frame = result.equity_curve.copy()
+        chart_frame["series"] = chart_frame["strategy_name"] + " (" + chart_frame["curve_type"] + ")"
+        st.plotly_chart(px.line(chart_frame, x="date", y="equity", color="series", title="PyBroker Equity Curves"), use_container_width=True)
+    if not result.walkforward_windows.empty:
+        st.subheader("Walk-Forward Windows")
+        st.dataframe(result.walkforward_windows, use_container_width=True, hide_index=True)
+    if not result.bootstrap_metrics.empty:
+        st.subheader("Bootstrap Confidence Intervals")
+        st.dataframe(result.bootstrap_metrics, use_container_width=True, hide_index=True)
+    st.subheader("Trade Audit")
+    if not result.trade_audit.empty:
+        st.dataframe(result.trade_audit, use_container_width=True, hide_index=True)
+    else:
+        st.info("No trade audit rows were generated for this run.")
+        st.dataframe(pd.DataFrame(columns=[
+            "strategy_id",
+            "symbol",
+            "timeframe",
+            "signal_timestamp",
+            "entry_timestamp",
+            "entry_price",
+            "entry_reason",
+            "exit_timestamp",
+            "exit_price",
+            "exit_reason",
+            "shares_contracts",
+            "position_value",
+            "percent_return",
+            "dollar_pnl",
+            "holding_period",
+            "holding_period_bars",
+            "entry_indicator_values",
+            "exit_indicator_values",
+        ]), use_container_width=True, hide_index=True)
+    if not result.trades.empty:
+        st.subheader("Trades")
+        st.dataframe(result.trades, use_container_width=True, hide_index=True)
+
+    if result.debug_frames:
+        st.subheader("Debug Charts")
+        for strategy_id, debug_frame in result.debug_frames.items():
+            if debug_frame.empty:
+                continue
+            trade_audit = result.trade_audit[result.trade_audit["strategy_id"] == strategy_id] if not result.trade_audit.empty else pd.DataFrame()
+            with st.container(border=True):
+                st.markdown(f"**{fixed_strategy_library()[strategy_id].display_name}**")
+                range_cols = st.columns(3)
+                range_mode = range_cols[0].selectbox(
+                    "Chart range",
+                    ["full_backtest_range", "last_1_trading_day", "last_5_trading_days", "around_selected_trade"],
+                    format_func=lambda value: {
+                        "full_backtest_range": "Full backtest range",
+                        "last_1_trading_day": "Last 1 trading day",
+                        "last_5_trading_days": "Last 5 trading days",
+                        "around_selected_trade": "Around selected trade",
+                    }[value],
+                    key=f"pybroker_debug_range_{strategy_id}",
+                )
+                trade_index = None
+                if range_mode == "around_selected_trade" and not trade_audit.empty:
+                    trade_options = trade_audit.reset_index(drop=True).index.tolist()
+                    trade_index = range_cols[1].selectbox(
+                        "Trade",
+                        trade_options,
+                        format_func=lambda value: format_debug_trade_label(trade_audit.reset_index(drop=True).iloc[int(value)]),
+                        key=f"pybroker_debug_trade_{strategy_id}",
+                    )
+                show_legend = range_cols[2].checkbox("Show legend", value=False, key=f"pybroker_debug_legend_{strategy_id}")
+                filtered_frame, filtered_trade_audit = filter_pybroker_debug_window(
+                    debug_frame,
+                    trade_audit,
+                    range_mode=range_mode,
+                    selected_trade_index=trade_index,
+                )
+                actual_data_row = None
+                if not result.actual_data_used.empty:
+                    actual_match = result.actual_data_used[result.actual_data_used["strategy_id"] == strategy_id]
+                    if not actual_match.empty:
+                        actual_data_row = actual_match.iloc[0].to_dict()
+                metadata_symbol = str(filtered_frame["symbol"].iloc[0]) if "symbol" in filtered_frame.columns and not filtered_frame.empty else "SPY"
+                chart_metadata = build_chart_metadata(actual_data_row=actual_data_row, chart_frame=filtered_frame, symbol=metadata_symbol)
+                st.dataframe(chart_metadata, use_container_width=True, hide_index=True)
+                st.plotly_chart(build_pybroker_debug_chart(filtered_frame, filtered_trade_audit, strategy_id, show_legend=show_legend), use_container_width=True, config={"displayModeBar": True, "displaylogo": False, "responsive": True})
+                indicator_debug = result.indicator_debug_tables.get(strategy_id, pd.DataFrame())
+                st.caption("Entry and exit indicator values used by the strategy on the audited trades.")
+                st.dataframe(indicator_debug, use_container_width=True, hide_index=True)
+                higher_timeframe_check = result.higher_timeframe_checks.get(strategy_id, pd.DataFrame())
+                with st.expander("Higher Timeframe Lookahead Check", expanded=False):
+                    if higher_timeframe_check.empty:
+                        st.info("This strategy does not use higher timeframe data.")
+                    else:
+                        st.dataframe(higher_timeframe_check, use_container_width=True, hide_index=True)
+                raw_bars = result.actual_bars.get(strategy_id, pd.DataFrame())
+                with st.expander("Raw Bars Preview", expanded=False):
+                    if raw_bars.empty:
+                        st.info("No raw bars were retained for this strategy.")
+                    else:
+                        preview_columns = [column for column in ["timestamp", "open", "high", "low", "close", "volume"] if column in raw_bars.columns or column == "timestamp"]
+                        raw_preview = raw_bars.copy()
+                        if "date" in raw_preview.columns and "timestamp" not in raw_preview.columns:
+                            raw_preview["timestamp"] = pd.to_datetime(raw_preview["date"])
+                        st.caption("First 10 rows")
+                        st.dataframe(raw_preview.loc[:, preview_columns].head(10), use_container_width=True, hide_index=True)
+                        st.caption("Last 10 rows")
+                        st.dataframe(raw_preview.loc[:, preview_columns].tail(10), use_container_width=True, hide_index=True)
+                        export_name = build_raw_bars_export_name(metadata_symbol, str(actual_data_row.get("timeframe") if actual_data_row else state["config"]["timeframe"]), raw_preview)
+                        st.download_button(
+                            "Download raw bars CSV",
+                            data=raw_preview.loc[:, preview_columns].to_csv(index=False).encode("utf-8"),
+                            file_name=export_name,
+                            mime="text/csv",
+                            key=f"pybroker_raw_bars_download_{strategy_id}",
+                        )
+
+    report_path = Path(state["output_dir"]) / "report.md"
+    if report_path.exists():
+        with st.expander("Report Markdown", expanded=False):
+            st.markdown(report_path.read_text(encoding="utf-8"))
+
+    st.subheader("Downloads")
+    for filename in [
+        "summary.csv",
+        "strategy_metrics.csv",
+        "benchmark_metrics.csv",
+        "actual_data_used.csv",
+        "benchmark_summary.csv",
+        "trade_audit.csv",
+        "trades.csv",
+        "equity_curve.csv",
+        "bootstrap_metrics.csv",
+        "walkforward_windows.csv",
+        "report.md",
+    ]:
+        path = Path(state["output_dir"]) / filename
+        if not path.exists():
+            continue
+        mime = "text/markdown" if path.suffix == ".md" else "text/csv"
+        st.download_button(
+            f"Download {filename}",
+            data=path.read_bytes(),
+            file_name=path.name,
+            mime=mime,
+            key=f"pybroker_download_{filename}",
+        )    
+
+
+def format_debug_trade_label(trade_row: pd.Series) -> str:
+    entry_timestamp = pd.to_datetime(trade_row.get("entry_timestamp"))
+    exit_timestamp = pd.to_datetime(trade_row.get("exit_timestamp"))
+    entry_text = "unknown" if pd.isna(entry_timestamp) else entry_timestamp.strftime("%Y-%m-%d %H:%M")
+    exit_text = "open" if pd.isna(exit_timestamp) else exit_timestamp.strftime("%Y-%m-%d %H:%M")
+    return f"{entry_text} to {exit_text}"
+
+
+def filter_pybroker_debug_window(
+    debug_frame: pd.DataFrame,
+    trade_audit: pd.DataFrame,
+    *,
+    range_mode: str,
+    selected_trade_index: int | None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    chart_frame = debug_frame.copy().sort_values("timestamp").reset_index(drop=True)
+    filtered_trade_audit = trade_audit.copy().reset_index(drop=True)
+    if chart_frame.empty:
+        return chart_frame, filtered_trade_audit
+    if range_mode == "last_1_trading_day":
+        last_session = chart_frame["session_date"].iloc[-1]
+        chart_frame = chart_frame[chart_frame["session_date"] == last_session].reset_index(drop=True)
+    elif range_mode == "last_5_trading_days":
+        sessions = chart_frame["session_date"].dropna().drop_duplicates().tolist()
+        selected_sessions = set(sessions[-5:])
+        chart_frame = chart_frame[chart_frame["session_date"].isin(selected_sessions)].reset_index(drop=True)
+    elif range_mode == "around_selected_trade" and selected_trade_index is not None and not filtered_trade_audit.empty:
+        trade_row = filtered_trade_audit.iloc[int(selected_trade_index)]
+        entry_timestamp = pd.to_datetime(trade_row.get("entry_timestamp"))
+        exit_timestamp = pd.to_datetime(trade_row.get("exit_timestamp"))
+        entry_matches = chart_frame.index[chart_frame["timestamp"] == entry_timestamp].tolist()
+        exit_matches = chart_frame.index[chart_frame["timestamp"] == exit_timestamp].tolist()
+        entry_idx = entry_matches[0] if entry_matches else max(chart_frame["timestamp"].searchsorted(entry_timestamp) - 1, 0)
+        exit_idx = exit_matches[0] if exit_matches else min(chart_frame["timestamp"].searchsorted(exit_timestamp), len(chart_frame) - 1)
+        start_idx = max(entry_idx - 20, 0)
+        end_idx = min(exit_idx + 20, len(chart_frame) - 1)
+        chart_frame = chart_frame.iloc[start_idx : end_idx + 1].reset_index(drop=True)
+        window_start = chart_frame["timestamp"].min()
+        window_end = chart_frame["timestamp"].max()
+        if not filtered_trade_audit.empty:
+            filtered_trade_audit = filtered_trade_audit[
+                pd.to_datetime(filtered_trade_audit["entry_timestamp"]).between(window_start, window_end)
+                | pd.to_datetime(filtered_trade_audit["exit_timestamp"]).between(window_start, window_end)
+            ].reset_index(drop=True)
+    return chart_frame, filtered_trade_audit
+
+
+def build_pybroker_debug_chart(debug_frame: pd.DataFrame, trade_audit: pd.DataFrame, strategy_id: str, *, show_legend: bool = False):
+    chart_frame = debug_frame.copy().sort_values("timestamp").reset_index(drop=True)
+    has_oscillator_panel = any(column in chart_frame.columns for column in ["combined_momentum", "qqe_rsi_ma", "qqe_trailing_line", "rsi_ma"])
+    fig = make_subplots(
+        rows=3 if has_oscillator_panel else 2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.65, 0.15, 0.2] if has_oscillator_panel else [0.75, 0.25],
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=chart_frame["timestamp"],
+            open=chart_frame["open"],
+            high=chart_frame["high"],
+            low=chart_frame["low"],
+            close=chart_frame["close"],
+            name="OHLC",
+        ),
+        row=1,
+        col=1,
+    )
+    overlay_styles = {
+        "trail": dict(name="Blackflag Trail", color="#1f77b4", dash="solid"),
+        "fib1": dict(name="Fib1", color="#17becf", dash="dot"),
+        "fib2": dict(name="Fib2", color="#2ca02c", dash="dot"),
+        "fib3": dict(name="Fib3", color="#9467bd", dash="dot"),
+        "higher_hma": dict(name="HMA", color="#ff7f0e", dash="solid"),
+        "fast_ema": dict(name="Fast EMA", color="#d62728", dash="solid"),
+        "slow_ema": dict(name="Slow EMA", color="#8c564b", dash="solid"),
+    }
+    for column, style in overlay_styles.items():
+        if column in chart_frame.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=chart_frame["timestamp"],
+                    y=chart_frame[column],
+                    mode="lines",
+                    name=style["name"],
+                    line=dict(color=style["color"], dash=style["dash"]),
+                ),
+                row=1,
+                col=1,
+            )
+
+    if not trade_audit.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=pd.to_datetime(trade_audit["entry_timestamp"]),
+                y=pd.to_numeric(trade_audit["entry_price"]),
+                mode="markers",
+                marker=dict(symbol="triangle-up", size=11, color="#2ca02c"),
+                name="Entries",
+                customdata=trade_audit[["entry_reason"]].to_numpy(),
+                hovertemplate="Entry<br>%{x}<br>Price=%{y:.2f}<br>Reason=%{customdata[0]}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=pd.to_datetime(trade_audit["exit_timestamp"]),
+                y=pd.to_numeric(trade_audit["exit_price"]),
+                mode="markers",
+                marker=dict(symbol="triangle-down", size=11, color="#d62728"),
+                name="Exits",
+                customdata=trade_audit[["exit_reason"]].to_numpy(),
+                hovertemplate="Exit<br>%{x}<br>Price=%{y:.2f}<br>Reason=%{customdata[0]}<extra></extra>",
+            ),
+            row=1,
+            col=1,
+        )
+
+    volume_colors = [
+        "#2ca02c" if float(close) >= float(open_) else "#d62728"
+        for open_, close in zip(chart_frame["open"], chart_frame["close"], strict=False)
+    ]
+    fig.add_trace(
+        go.Bar(x=chart_frame["timestamp"], y=chart_frame["volume"], marker_color=volume_colors, name="Volume"),
+        row=2,
+        col=1,
+    )
+
+    if has_oscillator_panel:
+        oscillator_row = 3
+        oscillator_columns = [
+            ("combined_momentum", "Combined Momentum", "#1f77b4"),
+            ("rsi_ma", "QQE RSI MA", "#17becf"),
+            ("qqe_rsi_ma", "QQE RSI MA", "#17becf"),
+            ("qqe_trailing_line", "QQE Trailing Line", "#ff7f0e"),
+        ]
+        plotted = set()
+        for column, label, color in oscillator_columns:
+            if column in chart_frame.columns and column not in plotted:
+                fig.add_trace(
+                    go.Scatter(x=chart_frame["timestamp"], y=chart_frame[column], mode="lines", name=label, line=dict(color=color)),
+                    row=oscillator_row,
+                    col=1,
+                )
+                plotted.add(column)
+        fig.add_hline(y=50.0, line_dash="dash", line_color="#7f7f7f", row=oscillator_row, col=1)
+        strategy_settings = fixed_strategy_library()[strategy_id].fixed_settings
+        for level_key in ["rsi_super_oversold", "rsi_oversold", "rsi_low_neutral", "rsi_high_neutral", "rsi_overbought", "rsi_super_overbought"]:
+            if level_key in strategy_settings:
+                fig.add_hline(y=float(strategy_settings[level_key]), line_dash="dot", line_color="#bdbdbd", row=oscillator_row, col=1)
+
+    fig.update_layout(
+        title=dict(text=f"{fixed_strategy_library()[strategy_id].display_name} Debug Chart", y=0.985, x=0.02, xanchor="left"),
+        legend_orientation="h",
+        showlegend=show_legend,
+        legend=dict(yanchor="bottom", y=1.01, xanchor="left", x=0.0, bgcolor="rgba(255,255,255,0.7)", font=dict(size=10)),
+        margin=dict(l=70, r=24, t=95, b=28),
+        xaxis_rangeslider_visible=False,
+        hovermode="x unified",
+        height=980 if has_oscillator_panel else 840,
+    )
+    fig.update_yaxes(title_text="Price", row=1, col=1, title_standoff=8, automargin=True, tickfont=dict(size=11))
+    fig.update_yaxes(title_text="Volume", row=2, col=1, title_standoff=8, automargin=True, tickfont=dict(size=10))
+    fig.update_xaxes(showticklabels=False, row=1, col=1)
+    fig.update_xaxes(showticklabels=not has_oscillator_panel, row=2, col=1)
+    if has_oscillator_panel:
+        fig.update_yaxes(title_text="QQE / RSI", row=3, col=1, title_standoff=8, automargin=True, tickfont=dict(size=10))
+        fig.update_xaxes(showticklabels=False, row=1, col=1)
+        fig.update_xaxes(showticklabels=False, row=2, col=1)
+        fig.update_xaxes(showticklabels=True, row=3, col=1)
+    return fig
+
+
+def build_candle_comparison_chart(comparison: CandleComparisonResult):
+    frame = comparison.merged.copy().sort_values("timestamp").reset_index(drop=True)
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        row_heights=[0.38, 0.38, 0.24],
+        subplot_titles=("yfinance Candles", "TradingView Candles", "Close Difference"),
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=frame["timestamp"],
+            open=frame["open_yfinance"],
+            high=frame["high_yfinance"],
+            low=frame["low_yfinance"],
+            close=frame["close_yfinance"],
+            name="yfinance",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=frame["timestamp"],
+            open=frame["open_tradingview"],
+            high=frame["high_tradingview"],
+            low=frame["low_tradingview"],
+            close=frame["close_tradingview"],
+            name="TradingView",
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=frame["timestamp"], y=frame["close_diff"], mode="lines", name="Close Diff"),
+        row=3,
+        col=1,
+    )
+    fig.update_layout(title="yfinance vs TradingView Candle Comparison", margin=dict(l=20, r=20, t=60, b=20), hovermode="x unified", xaxis_rangeslider_visible=False)
+    fig.update_yaxes(title_text="yfinance", row=1, col=1)
+    fig.update_yaxes(title_text="TradingView", row=2, col=1)
+    fig.update_yaxes(title_text="Close Diff", row=3, col=1)
+    return fig
+
+
+def load_tradingview_csv_payload(uploaded_file, local_path: str) -> bytes | None:
+    if uploaded_file is not None:
+        return uploaded_file.getvalue()
+    if local_path.strip():
+        path = Path(local_path.strip())
+        if not path.exists():
+            raise FileNotFoundError(f"TradingView CSV path was not found: {path}")
+        return path.read_bytes()
+    return None
+
+
+def render_tradingview_parity_tool(
+    *,
+    provider: YFinanceDataProvider,
+    symbols_raw: str,
+    start_date: str,
+    end_date: str,
+    refresh_data: bool,
+    timeframe: str,
+) -> None:
+    with st.expander("yfinance vs TradingView Candle Parity", expanded=False):
+        st.caption("Use this to compare the app's yfinance candles against a TradingView CSV export before changing any strategy logic.")
+        if timeframe != "5m":
+            st.info("This parity tool is currently configured for 5-minute candle comparison. Switch the PyBroker Lab timeframe to `5m` for a like-for-like comparison.")
+        compare_cols = st.columns(4)
+        timezone = compare_cols[0].selectbox("Timezone", ["America/New_York", "UTC"], index=0, key="tv_parity_timezone")
+        timestamp_basis = compare_cols[1].selectbox("TradingView timestamp basis", ["bar_start", "bar_end"], index=0, key="tv_parity_timestamp_basis")
+        shift_dataset = compare_cols[2].selectbox(
+            "Alignment shift",
+            ["none", "shift_yfinance_forward_1_bar", "shift_tradingview_forward_1_bar"],
+            index=0,
+            format_func=lambda value: {
+                "none": "No shift",
+                "shift_yfinance_forward_1_bar": "Shift yfinance forward 1 bar",
+                "shift_tradingview_forward_1_bar": "Shift TradingView forward 1 bar",
+            }[value],
+            key="tv_parity_shift",
+        )
+        regular_hours_only = compare_cols[3].checkbox("Regular hours only", value=True, key="tv_parity_regular_hours")
+        upload_cols = st.columns(2)
+        uploaded_file = upload_cols[0].file_uploader("TradingView CSV export", type=["csv"], key="tv_parity_upload")
+        local_path = upload_cols[1].text_input("Or local CSV path", value="", key="tv_parity_local_path")
+        if st.button("Run Candle Parity Comparison", key="tv_parity_run_button"):
+            symbols = normalize_ticker_list(symbols_raw)
+            if not symbols:
+                st.error("A symbol is required to compare candles.")
+                return
+            try:
+                payload = load_tradingview_csv_payload(uploaded_file, local_path)
+            except FileNotFoundError as exc:
+                st.error(str(exc))
+                return
+            if payload is None:
+                st.error("Upload a TradingView CSV or provide a local CSV path.")
+                return
+            try:
+                tradingview_frame = parse_tradingview_csv(
+                    payload,
+                    timeframe="5m",
+                    timezone=timezone,
+                    timestamp_basis=timestamp_basis,
+                    symbol=symbols[0],
+                )
+                yfinance_frame = provider.get_stock_bars(
+                    symbols[0],
+                    start_date,
+                    end_date,
+                    timeframe="5m",
+                    force_refresh=refresh_data,
+                )
+                comparison = compare_candle_frames(
+                    yfinance_frame,
+                    tradingview_frame,
+                    symbol=symbols[0],
+                    timeframe="5m",
+                    timezone=timezone,
+                    regular_hours_only=regular_hours_only,
+                    timestamp_basis=timestamp_basis,
+                    shift_dataset=shift_dataset,
+                )
+            except Exception as exc:  # pragma: no cover - surfaced to the UI
+                st.error(f"Parity comparison failed: {exc}")
+                return
+            st.subheader("Comparison Summary")
+            st.dataframe(comparison.summary, use_container_width=True, hide_index=True)
+            st.subheader("Worst 25 Mismatched Bars")
+            st.dataframe(comparison.worst_mismatches, use_container_width=True, hide_index=True)
+            st.plotly_chart(build_candle_comparison_chart(comparison), use_container_width=True)
+            st.download_button(
+                "Export candle comparison mismatches CSV",
+                data=comparison.worst_mismatches.to_csv(index=False).encode("utf-8"),
+                file_name="tradingview_candle_mismatches.csv",
+                mime="text/csv",
+                key="tv_parity_download_mismatches",
+            )
+
+
+def render_pybroker_lab_workspace(
+    *,
+    provider: YFinanceDataProvider,
+    start_date: str,
+    end_date: str,
+    refresh_data: bool,
+    base_config: BacktestConfig,
+) -> None:
+    st.header("PyBroker Lab")
+    st.caption("Server-side PyBroker backtests for a fixed library of default Thinkorswim-era strategies, evaluated against buy-and-hold on the same symbol and period.")
+    st.info("Indicator settings are hard-coded in the codebase. The UI only exposes strategy selection and normal backtest inputs.")
+
+    labels = pybroker_strategy_labels()
+    registry = strategy_registry()
+    strategy_options = ["all", *registry.keys()]
+    selected_strategy = st.selectbox("Strategy", strategy_options, format_func=lambda value: labels.get(value, value), key="pybroker_strategy")
+    render_pybroker_strategy_description(selected_strategy)
+
+    library = fixed_strategy_library()
+    timeframe_options = ["15m", "5m"]
+    if selected_strategy != "all":
+        timeframe_options = list(library[selected_strategy].supported_timeframes)
+    default_symbols = "SPY"
+    setup_cols = st.columns(4)
+    symbols_raw = setup_cols[0].text_input("Symbols", value=default_symbols, key="pybroker_symbols", help="These fixed strategy templates run on the symbols you provide and compare the result to the benchmark symbol.")
+    benchmark_symbol = setup_cols[1].text_input("Benchmark", value="SPY", key="pybroker_benchmark").upper().strip()
+    timeframe = setup_cols[2].selectbox("Timeframe", timeframe_options, key="pybroker_timeframe", help="These strategy templates are intraday and execute on completed bars with next-bar fills.")
+    walkforward_windows = int(setup_cols[3].number_input("Walk-forward windows", min_value=2, max_value=10, value=3, key="pybroker_windows"))
+    if is_intraday_timeframe(timeframe):
+        requested_days = max((pd.Timestamp(end_date) - pd.Timestamp(start_date)).days, 0)
+        if requested_days > INTRADAY_MAX_HISTORY_DAYS:
+            effective_start = (pd.Timestamp(end_date) - pd.Timedelta(days=INTRADAY_MAX_HISTORY_DAYS)).date().isoformat()
+            st.warning(
+                f"Intraday bars are fetched on demand and cached, but the current yfinance path only supports roughly the most recent "
+                f"{INTRADAY_MAX_HISTORY_DAYS} days. This run will clamp the effective intraday start date to about `{effective_start}`."
+            )
+        else:
+            st.caption(
+                f"Intraday bars are fetched on demand and cached in DuckDB. The current provider supports about the most recent "
+                f"{INTRADAY_MAX_HISTORY_DAYS} days of `15m`/`5m` history."
+            )
+
+    config_cols = st.columns(5)
+    initial_cash = float(config_cols[0].number_input("Initial cash", min_value=1000.0, value=float(base_config.initial_capital), key="pybroker_initial_cash"))
+    train_size = float(config_cols[1].number_input("Train size", min_value=0.5, max_value=0.95, value=0.7, step=0.05, key="pybroker_train_size"))
+    warmup_bars = int(config_cols[2].number_input("Warmup bars", min_value=20, max_value=400, value=200, key="pybroker_warmup"))
+    slippage_bps = float(config_cols[3].number_input("Slippage bps", min_value=0.0, value=float(base_config.slippage_pct * 10000.0), format="%.2f", key="pybroker_slippage_bps"))
+    commission_bps = float(config_cols[4].number_input("Commission bps", min_value=0.0, value=1.0, format="%.2f", key="pybroker_commission_bps"))
+    bootstrap_sample_size = int(st.number_input("Bootstrap sample size", min_value=50, max_value=5000, value=1000, step=50, key="pybroker_bootstrap_size"))
+    sizing_cols = st.columns(2)
+    sizing_method = sizing_cols[0].selectbox(
+        "Position sizing",
+        ["percent_equity", "fixed_dollar", "fixed_shares"],
+        index=0,
+        format_func=lambda value: {
+            "percent_equity": "100% equity allocation",
+            "fixed_dollar": "Fixed dollar allocation",
+            "fixed_shares": "Fixed share quantity",
+        }[value],
+        key="pybroker_sizing_method",
+    )
+    if sizing_method == "percent_equity":
+        percent_label = sizing_cols[1].selectbox("Equity allocation", [1.0, 0.5], index=0, format_func=lambda value: "100% equity" if float(value) == 1.0 else "50% equity", key="pybroker_sizing_percent")
+        sizing_value = float(percent_label)
+    elif sizing_method == "fixed_dollar":
+        sizing_value = float(sizing_cols[1].number_input("Fixed dollar allocation", min_value=0.0, value=float(initial_cash), key="pybroker_sizing_fixed_dollar"))
+    else:
+        sizing_value = float(sizing_cols[1].number_input("Fixed share quantity", min_value=0.0, value=100.0, key="pybroker_sizing_fixed_shares"))
+
+    st.caption("No optimizer is used here. Fixed strategy logic stays in code, while sizing is a backtest-level control recorded in the results alongside the actual data range and benchmark comparison.")
+    render_tradingview_parity_tool(
+        provider=provider,
+        symbols_raw=symbols_raw,
+        start_date=start_date,
+        end_date=end_date,
+        refresh_data=refresh_data,
+        timeframe=timeframe,
+    )
+    if st.button("Run PyBroker Lab", key="pybroker_run_button", type="primary"):
+        symbols = normalize_ticker_list(symbols_raw)
+        if benchmark_symbol and benchmark_symbol not in symbols:
+            symbols.append(benchmark_symbol)
+        if not symbols:
+            st.error("At least one symbol is required.")
+        else:
+            output_dir = Path("outputs/pybroker_lab") / f"{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+            with st.spinner("Running PyBroker research on the Streamlit server..."):
+                price_data, statuses, validation_warnings = collect_pybroker_data(
+                    provider,
+                    symbols,
+                    start_date,
+                    end_date,
+                    refresh_data,
+                    timeframe,
+                )
+                if price_data.empty:
+                    st.error("No bars were available for the requested symbols, timeframe, and date range.")
+                else:
+                    config = PyBrokerLabConfig(
+                        symbols=tuple(symbols),
+                        benchmark_symbol=benchmark_symbol or "SPY",
+                        start_date=start_date,
+                        end_date=end_date,
+                        initial_cash=initial_cash,
+                        timeframe=timeframe,
+                        commission_bps=commission_bps,
+                        slippage_bps=slippage_bps,
+                        warmup_bars=warmup_bars,
+                        train_size=train_size,
+                        walkforward_windows=walkforward_windows,
+                        bootstrap_sample_size=bootstrap_sample_size,
+                        output_dir=output_dir,
+                        strategy_params={},
+                        sizing_method=sizing_method,
+                        sizing_value=sizing_value,
+                    )
+                    result = run_pybroker_lab(config, strategy_name=selected_strategy, data_frame=price_data, statuses=statuses)
+                    st.session_state[SESSION_PYBROKER_LAB_KEY] = {
+                        "result": result,
+                        "output_dir": str(result.output_dir),
+                        "config": {
+                            "strategy": selected_strategy,
+                            "symbols": ",".join(symbols),
+                            "benchmark_symbol": benchmark_symbol,
+                            "timeframe": timeframe,
+                            "sizing_method": sizing_method,
+                            "sizing_value": sizing_value,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                        },
+                        "statuses": statuses,
+                        "validation_warnings": validation_warnings,
+                        "price_data": price_data,
+                    }
+
+    state = st.session_state.get(SESSION_PYBROKER_LAB_KEY)
+    if state:
+        render_pybroker_run_result(state)
+        render_warning_list(state.get("validation_warnings", []), "No PyBroker data warnings were generated.")
 
 
 def build_indicator_preview_frame(
@@ -3325,7 +4012,12 @@ def render_data_settings_workspace(
     st.write({"db_path": db.db_path})
     db_path = Path(db.db_path)
     if db_path.exists():
-        st.download_button("Backup Database", data=db_path.read_bytes(), file_name=db_path.name, mime="application/octet-stream", key="data_settings_backup_db")
+        try:
+            db_bytes = db_path.read_bytes()
+        except OSError as exc:
+            st.warning(f"Database backup is temporarily unavailable because Windows is locking `{db_path.name}`: {exc}")
+        else:
+            st.download_button("Backup Database", data=db_bytes, file_name=db_path.name, mime="application/octet-stream", key="data_settings_backup_db")
     else:
         st.info("The DuckDB database file does not exist yet.")
     if show_advanced_tools:
@@ -3638,7 +4330,7 @@ def main() -> None:
     current_meta = st.session_state.get(SESSION_META_KEY, {})
 
     tabs = st.tabs(get_primary_tab_labels())
-    tab_spy_workbench, tab_forward, tab_history, tab_market_regime, tab_data = tabs
+    tab_spy_workbench, tab_pybroker, tab_forward, tab_history, tab_market_regime, tab_data = tabs
 
     with tab_spy_workbench:
         render_spy_strategy_lab(
@@ -3669,6 +4361,15 @@ def main() -> None:
                     base_config=base_config,
                     default_tickers=normalize_ticker_list(tickers),
                 )
+
+    with tab_pybroker:
+        render_pybroker_lab_workspace(
+            provider=provider,
+            start_date=str(start_date),
+            end_date=str(end_date),
+            refresh_data=refresh_data,
+            base_config=base_config,
+        )
 
     with tab_forward:
         render_forward_paper_workspace(

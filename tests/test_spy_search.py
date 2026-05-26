@@ -12,6 +12,8 @@ from trading_lab.spy_lab import (
     SpySearchCombination,
     SpySearchEntryPreset,
     SpySearchExitPreset,
+    build_spy_search_summary_comment,
+    describe_spy_search_archetype,
     generate_approved_spy_entry_presets,
     generate_approved_spy_exit_presets,
     generate_spy_search_combinations,
@@ -51,11 +53,13 @@ def test_approved_spy_entry_and_exit_preset_generation():
     experimental_entries = generate_approved_spy_entry_presets("5m")
     exits = generate_approved_spy_exit_presets()
     assert len(entries) == 14
-    assert len(intraday_entries) == 4
+    assert len(intraday_entries) == 5
     assert len(experimental_entries) == 2
     assert len(exits) == 22
     assert all(entry.entry_strategy_name for entry in entries)
     assert all(entry.timeframe == "15m" for entry in intraday_entries)
+    assert "Opening Range Breakout" in {entry.entry_strategy_name for entry in intraday_entries}
+    assert "SwingArm Trend" in {entry.entry_strategy_name for entry in intraday_entries}
     assert "partial_take_profit_plus_trailing_stop" not in {exit_preset.exit_structure_key for exit_preset in exits}
 
 
@@ -100,6 +104,34 @@ def test_spy_search_candidate_grading_and_suspicious_detection():
     assert strong_flags <= 2
     assert reject_label == "Reject"
     assert reject_flags >= 5
+
+
+def test_spy_search_summary_comment_mentions_intraday_archetype():
+    comment = build_spy_search_summary_comment(
+        {
+            "timeframe": "15m",
+            "entry_strategy_name": "Opening Range Breakout",
+            "entry_preset_label": "15m opening range + pressure",
+            "exit_structure_name": "OCO bracket",
+            "exit_preset_label": "OCO 3% / 6%",
+            "number_of_trades": 12,
+            "excess_cagr": 0.03,
+            "drawdown_improvement": 0.05,
+            "experimental": False,
+        }
+    )
+    assert "opening-range breakout with volume-pressure confirmation" in comment
+    assert "OCO bracket" in comment
+
+
+def test_spy_search_archetype_description_handles_intraday_variants():
+    archetype = describe_spy_search_archetype(
+        {
+            "entry_strategy_name": "Intraday QQE/HMA State",
+            "entry_preset_label": "15m QQE/HMA + SwingArm",
+        }
+    )
+    assert archetype == "QQE/HMA state filter"
 
 
 def test_spy_search_ranking_categories():
@@ -183,7 +215,15 @@ def test_spy_search_result_output_shape_and_no_trade_handling(monkeypatch):
     )
     assert payload["total_combinations_tested"] == 1
     assert payload["timeframe"] == "1d"
-    assert set(results.columns) >= {"result_id", "entry_strategy_name", "exit_structure_name", "candidate_label", "summary_comment"}
+    assert set(results.columns) >= {
+        "result_id",
+        "entry_strategy_name",
+        "strategy_archetype",
+        "exit_structure_name",
+        "exit_archetype",
+        "candidate_label",
+        "summary_comment",
+    }
     assert results.iloc[0]["candidate_label"] in {"Reject", "Not ready"}
     assert "Best Overall" in highlights
 

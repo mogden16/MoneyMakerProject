@@ -14,11 +14,14 @@ from trading_lab.backtest.metrics import compute_summary_metrics
 from trading_lab.data.providers.yfinance_provider import CacheStatus, YFinanceDataProvider
 from trading_lab.spy_lab import prepare_spy_timeframe_bars
 from trading_lab.strategies.breakout import BreakoutStrategy
+from trading_lab.strategies.intraday_qqe_hma import IntradayQQEHMAStateStrategy
 from trading_lab.strategies.intraday_breakout import IntradayBreakoutStrategy
 from trading_lab.strategies.intraday_pullback import IntradayPullbackStrategy
 from trading_lab.strategies.moving_average import MovingAverageCrossStrategy
+from trading_lab.strategies.opening_range_breakout import OpeningRangeBreakoutStrategy
 from trading_lab.strategies.qqe_hma_strategy import QQEHMAStrategy
 from trading_lab.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
+from trading_lab.strategies.swingarm_trend import SwingArmTrendStrategy
 from trading_lab.strategies.trend_filter import TrendFilterStrategy
 
 
@@ -37,6 +40,12 @@ STRATEGY_NAME_MAP = {
     "intraday_pullback": "Daily Trend + Intraday Pullback",
     "Daily Trend + Intraday Breakout": "intraday_breakout",
     "intraday_breakout": "Daily Trend + Intraday Breakout",
+    "Opening Range Breakout": "opening_range_breakout",
+    "opening_range_breakout": "Opening Range Breakout",
+    "Intraday QQE/HMA State": "intraday_qqe_hma",
+    "intraday_qqe_hma": "Intraday QQE/HMA State",
+    "SwingArm Trend": "swingarm_trend",
+    "swingarm_trend": "SwingArm Trend",
 }
 
 
@@ -77,6 +86,12 @@ def build_strategy_instance(strategy_name: str, parameters: dict[str, Any]):
         return IntradayPullbackStrategy(**parameters)
     if normalized == "Daily Trend + Intraday Breakout":
         return IntradayBreakoutStrategy(**parameters)
+    if normalized == "Opening Range Breakout":
+        return OpeningRangeBreakoutStrategy(**parameters)
+    if normalized == "Intraday QQE/HMA State":
+        return IntradayQQEHMAStateStrategy(**parameters)
+    if normalized == "SwingArm Trend":
+        return SwingArmTrendStrategy(**parameters)
     raise ValueError(f"Unsupported active paper strategy: {strategy_name}")
 
 

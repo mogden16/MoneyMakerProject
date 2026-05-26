@@ -155,12 +155,14 @@ class YFinanceDataProvider(MarketDataProvider):
         end_ts = pd.Timestamp(requested_end)
         download_start = start_ts if full_refresh or latest_cached is None or latest_cached.date() < start_ts.date() else latest_cached.normalize()
         try:
-            bars = self._normalize_download(symbol=symbol, timeframe=timeframe, raw=self._download_bars(symbol=symbol, start=download_start, end=end_ts))
+            bars = self._normalize_download(symbol=symbol, timeframe=timeframe, raw=self._download_bars(symbol=symbol, start=download_start, end=end_ts, interval=timeframe))
+            bars = bars[(pd.to_datetime(bars["session_date"]) >= start_ts.normalize()) & (pd.to_datetime(bars["session_date"]) <= end_ts.normalize())].copy()
             self.database.upsert_stock_bars(bars, symbol=symbol, timeframe=timeframe)
         except Exception:
             if full_refresh:
                 raise
-            fallback = self._normalize_download(symbol=symbol, timeframe=timeframe, raw=self._download_bars(symbol=symbol, start=start_ts, end=end_ts))
+            fallback = self._normalize_download(symbol=symbol, timeframe=timeframe, raw=self._download_bars(symbol=symbol, start=start_ts, end=end_ts, interval=timeframe))
+            fallback = fallback[(pd.to_datetime(fallback["session_date"]) >= start_ts.normalize()) & (pd.to_datetime(fallback["session_date"]) <= end_ts.normalize())].copy()
             self.database.replace_stock_bars(fallback, symbol=symbol, timeframe=timeframe)
 
         actions = self._download_corporate_actions(symbol)
@@ -168,16 +170,28 @@ class YFinanceDataProvider(MarketDataProvider):
             self.database.upsert_corporate_actions(actions, symbol=symbol)
 
     def _download_bars(self, symbol: str, start: pd.Timestamp, end: pd.Timestamp, interval: str = "1d") -> pd.DataFrame:
-        downloaded = yf.download(
-            tickers=symbol,
-            start=start,
-            end=end + pd.Timedelta(days=1),
-            interval=interval,
-            auto_adjust=False,
-            actions=True,
-            progress=False,
-            prepost=False,
-        )
+        if is_intraday_timeframe(interval):
+            lookback_days = min(max((end.normalize() - start.normalize()).days + 5, 7), 60)
+            downloaded = yf.download(
+                tickers=symbol,
+                period=f"{lookback_days}d",
+                interval=interval,
+                auto_adjust=False,
+                actions=True,
+                progress=False,
+                prepost=False,
+            )
+        else:
+            downloaded = yf.download(
+                tickers=symbol,
+                start=start,
+                end=end + pd.Timedelta(days=1),
+                interval=interval,
+                auto_adjust=False,
+                actions=True,
+                progress=False,
+                prepost=False,
+            )
         if downloaded.empty:
             raise ValueError(f"No data returned for symbol {symbol}")
         return downloaded

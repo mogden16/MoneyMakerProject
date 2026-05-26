@@ -8,7 +8,7 @@ from trading_lab.data.database import TradingLabDatabase
 
 def test_app_imports_and_primary_tabs():
     labels = get_primary_tab_labels()
-    assert labels == ["SPY Workbench", "Forward Paper", "Research History", "Market Regime Report", "Data & Settings"]
+    assert labels == ["SPY Workbench", "PyBroker Lab", "Forward Paper", "Research History", "Market Regime Report", "Data & Settings"]
 
 
 def test_advanced_mode_defaults_off():

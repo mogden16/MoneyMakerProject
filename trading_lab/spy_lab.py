@@ -17,11 +17,14 @@ from trading_lab.backtest.walk_forward import run_walk_forward_analysis
 from trading_lab.data.intraday import INTRADAY_MAX_HISTORY_DAYS, is_intraday_timeframe
 from trading_lab.signals.scanner import determine_signal_type
 from trading_lab.strategies.breakout import BreakoutStrategy
+from trading_lab.strategies.intraday_qqe_hma import IntradayQQEHMAStateStrategy
 from trading_lab.strategies.intraday_breakout import IntradayBreakoutStrategy
 from trading_lab.strategies.intraday_pullback import IntradayPullbackStrategy
 from trading_lab.strategies.moving_average import MovingAverageCrossStrategy
+from trading_lab.strategies.opening_range_breakout import OpeningRangeBreakoutStrategy
 from trading_lab.strategies.qqe_hma_strategy import QQEHMAStrategy
 from trading_lab.strategies.rsi_mean_reversion import RSIMeanReversionStrategy
+from trading_lab.strategies.swingarm_trend import SwingArmTrendStrategy
 from trading_lab.strategies.trend_filter import TrendFilterStrategy
 
 
@@ -165,6 +168,34 @@ SPY_PRESETS: dict[str, SpyStrategyPreset] = {
         parameter_grid={"breakout_lookback_bars": [8, 12, 16], "exit_lookback_bars": [4, 6, 8]},
         timeframes=("15m", "5m"),
     ),
+    "opening_range_breakout": SpyStrategyPreset(
+        key="opening_range_breakout",
+        label="Opening Range Breakout",
+        strategy_name="Opening Range Breakout",
+        description="Long-only SPY opening-range breakout with optional volume and QQE confirmation.",
+        parameters={"breakout_buffer_pct": 0.0005, "max_or_width_pct": 0.01, "max_entry_time": "11:30", "require_daily_regime": True, "use_volume_pressure": True, "volume_pressure_threshold": 0.0, "qqe_state_mode": "off", "use_swingarm_exit": False, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_or_failure": True, "end_of_day_exit": True, "allow_overnight": False},
+        parameter_grid={"breakout_buffer_pct": [0.0005], "max_or_width_pct": [0.01], "volume_pressure_threshold": [0.0, 1.0]},
+        timeframes=("15m", "5m"),
+    ),
+    "intraday_qqe_hma": SpyStrategyPreset(
+        key="intraday_qqe_hma",
+        label="Intraday QQE/HMA State",
+        strategy_name="Intraday QQE/HMA State",
+        description="Uses QQE long/short/neutral states as a long-only intraday SPY filter with HMA and optional SwingArm exits.",
+        parameters={"hma_length": 21, "rsi_length": 14, "rsi_smoothing": 5, "qqe_factor": 4.236, "qqe_atr_smoothing": 14, "neutral_band": 2.5, "require_daily_regime": True, "require_hma_slope": True, "volume_pressure_threshold": 0.0, "use_swingarm_exit": True, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_hma_break": True, "end_of_day_exit": True, "allow_overnight": False},
+        parameter_grid={"hma_length": [18, 21], "qqe_factor": [3.5, 4.236], "volume_pressure_threshold": [0.0, 1.0]},
+        timeframes=("15m", "5m"),
+        experimental=True,
+    ),
+    "swingarm_trend": SpyStrategyPreset(
+        key="swingarm_trend",
+        label="SwingArm Trend",
+        strategy_name="SwingArm Trend",
+        description="Long-only SPY intraday trend entry using an ATR-adjusted SwingArm line.",
+        parameters={"atr_length": 14, "swing_lookback": 10, "atr_multiplier": 2.5, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False},
+        parameter_grid={"swing_lookback": [8, 10, 12], "atr_multiplier": [2.0, 2.5, 3.0]},
+        timeframes=("15m", "5m"),
+    ),
 }
 
 SPY_EXIT_STRUCTURES: dict[str, SpyExitStructure] = {
@@ -305,6 +336,12 @@ def build_spy_strategy(preset_key: str, custom_parameters: dict[str, Any] | None
         return IntradayPullbackStrategy(**params)
     if preset_key == "intraday_breakout":
         return IntradayBreakoutStrategy(**params)
+    if preset_key == "opening_range_breakout":
+        return OpeningRangeBreakoutStrategy(**params)
+    if preset_key == "intraday_qqe_hma":
+        return IntradayQQEHMAStateStrategy(**params)
+    if preset_key == "swingarm_trend":
+        return SwingArmTrendStrategy(**params)
     raise ValueError(f"Unsupported SPY preset: {preset_key}")
 
 
@@ -721,14 +758,15 @@ def generate_approved_spy_entry_presets(timeframe: str = "1d") -> list[SpySearch
         ]
     if timeframe == "15m":
         return [
-            SpySearchEntryPreset("intraday_pullback_balanced", "intraday_pullback", "Daily Trend + Intraday Pullback", "15m pullback balanced", {"rsi_length": 14, "oversold_threshold": 35.0, "recovery_threshold": 45.0, "moving_average_length": 8, "pullback_lookback_bars": 4, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "15-minute pullback recovery under a completed daily trend filter.", 3, timeframe="15m"),
-            SpySearchEntryPreset("intraday_pullback_fast", "intraday_pullback", "Daily Trend + Intraday Pullback", "15m pullback fast", {"rsi_length": 12, "oversold_threshold": 30.0, "recovery_threshold": 42.0, "moving_average_length": 6, "pullback_lookback_bars": 3, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Faster 15-minute pullback recovery preset.", 3, timeframe="15m"),
-            SpySearchEntryPreset("intraday_breakout_balanced", "intraday_breakout", "Daily Trend + Intraday Breakout", "15m breakout balanced", {"breakout_lookback_bars": 12, "exit_lookback_bars": 6, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "15-minute breakout under a completed daily trend filter.", 2, timeframe="15m"),
-            SpySearchEntryPreset("intraday_breakout_slow", "intraday_breakout", "Daily Trend + Intraday Breakout", "15m breakout slow", {"breakout_lookback_bars": 16, "exit_lookback_bars": 8, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Slower 15-minute breakout preset.", 2, timeframe="15m"),
+            SpySearchEntryPreset("opening_range_basic_15m", "opening_range_breakout", "Opening Range Breakout", "15m opening range basic", {"breakout_buffer_pct": 0.0005, "max_or_width_pct": 0.01, "max_entry_time": "11:30", "require_daily_regime": True, "use_volume_pressure": False, "volume_pressure_threshold": 0.0, "qqe_state_mode": "off", "use_swingarm_exit": False, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_or_failure": True, "end_of_day_exit": True, "allow_overnight": False}, "30-minute opening-range breakout without extra confirmation.", 2, timeframe="15m"),
+            SpySearchEntryPreset("opening_range_pressure_15m", "opening_range_breakout", "Opening Range Breakout", "15m opening range + pressure", {"breakout_buffer_pct": 0.0005, "max_or_width_pct": 0.01, "max_entry_time": "11:30", "require_daily_regime": True, "use_volume_pressure": True, "volume_pressure_threshold": 0.0, "qqe_state_mode": "off", "use_swingarm_exit": False, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_or_failure": True, "end_of_day_exit": True, "allow_overnight": False}, "Opening-range breakout confirmed by non-negative volume pressure.", 3, timeframe="15m"),
+            SpySearchEntryPreset("opening_range_swingarm_15m", "opening_range_breakout", "Opening Range Breakout", "15m opening range + SwingArm", {"breakout_buffer_pct": 0.0005, "max_or_width_pct": 0.01, "max_entry_time": "11:30", "require_daily_regime": True, "use_volume_pressure": True, "volume_pressure_threshold": 0.0, "qqe_state_mode": "long_or_neutral_positive", "use_swingarm_exit": True, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_or_failure": True, "end_of_day_exit": True, "allow_overnight": False}, "Opening-range breakout with pressure, QQE state, and SwingArm exit.", 4, timeframe="15m"),
+            SpySearchEntryPreset("intraday_qqe_hma_15m", "intraday_qqe_hma", "Intraday QQE/HMA State", "15m QQE/HMA + SwingArm", {"hma_length": 21, "rsi_length": 14, "rsi_smoothing": 5, "qqe_factor": 4.236, "qqe_atr_smoothing": 14, "neutral_band": 2.5, "require_daily_regime": True, "require_hma_slope": True, "volume_pressure_threshold": 0.0, "use_swingarm_exit": True, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_hma_break": True, "end_of_day_exit": True, "allow_overnight": False}, "QQE long-state plus HMA and volume pressure with SwingArm exit.", 4, timeframe="15m", experimental=True),
+            SpySearchEntryPreset("swingarm_trend_15m", "swingarm_trend", "SwingArm Trend", "15m SwingArm standalone", {"atr_length": 14, "swing_lookback": 10, "atr_multiplier": 2.5, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Standalone SwingArm trend-cross strategy.", 2, timeframe="15m"),
         ]
     return [
-        SpySearchEntryPreset("intraday_pullback_5m", "intraday_pullback", "Daily Trend + Intraday Pullback", "5m pullback experimental", {"rsi_length": 10, "oversold_threshold": 30.0, "recovery_threshold": 40.0, "moving_average_length": 8, "pullback_lookback_bars": 5, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Experimental 5-minute pullback recovery preset.", 4, timeframe="5m", experimental=True),
-        SpySearchEntryPreset("intraday_breakout_5m", "intraday_breakout", "Daily Trend + Intraday Breakout", "5m breakout experimental", {"breakout_lookback_bars": 18, "exit_lookback_bars": 8, "require_daily_regime": True, "end_of_day_exit": True, "allow_overnight": False}, "Experimental 5-minute breakout preset.", 4, timeframe="5m", experimental=True),
+        SpySearchEntryPreset("opening_range_pressure_5m", "opening_range_breakout", "Opening Range Breakout", "5m opening range experimental", {"breakout_buffer_pct": 0.0005, "max_or_width_pct": 0.01, "max_entry_time": "11:30", "require_daily_regime": True, "use_volume_pressure": True, "volume_pressure_threshold": 0.0, "qqe_state_mode": "off", "use_swingarm_exit": False, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_or_failure": True, "end_of_day_exit": True, "allow_overnight": False}, "Experimental 5-minute opening-range breakout with pressure confirmation.", 4, timeframe="5m", experimental=True),
+        SpySearchEntryPreset("intraday_qqe_hma_5m", "intraday_qqe_hma", "Intraday QQE/HMA State", "5m QQE/HMA experimental", {"hma_length": 18, "rsi_length": 12, "rsi_smoothing": 5, "qqe_factor": 3.5, "qqe_atr_smoothing": 14, "neutral_band": 2.5, "require_daily_regime": True, "require_hma_slope": True, "volume_pressure_threshold": 0.0, "use_swingarm_exit": True, "swing_lookback": 10, "atr_length": 14, "atr_multiplier": 2.5, "neutral_exit_bars": 3, "exit_on_hma_break": True, "end_of_day_exit": True, "allow_overnight": False}, "Experimental 5-minute QQE/HMA state strategy.", 5, timeframe="5m", experimental=True),
     ]
 
 
@@ -774,6 +812,53 @@ def generate_spy_search_combinations(timeframe: str = "1d") -> list[SpySearchCom
     return combinations
 
 
+def describe_spy_search_archetype(result_row: dict[str, Any]) -> str:
+    """Describe the entry archetype in plain English for reporting."""
+    strategy_name = str(result_row.get("entry_strategy_name", "") or "")
+    preset_label = str(result_row.get("entry_preset_label", "") or "")
+    lower_name = strategy_name.lower()
+    lower_label = preset_label.lower()
+    if "opening range" in lower_name or "opening range" in lower_label:
+        if "swingarm" in lower_label:
+            return "opening-range breakout with SwingArm exit logic"
+        if "pressure" in lower_label:
+            return "opening-range breakout with volume-pressure confirmation"
+        return "opening-range breakout"
+    if "qqe" in lower_name:
+        return "QQE/HMA state filter"
+    if "swingarm" in lower_name:
+        return "SwingArm trend-following"
+    if "rsi" in lower_name:
+        return "RSI pullback mean reversion"
+    if "moving average" in lower_name:
+        return "moving-average crossover"
+    if "trend filter" in lower_name:
+        return "long-term trend filter"
+    if "breakout" in lower_name:
+        return "breakout trend-following"
+    return strategy_name or "strategy setup"
+
+
+def describe_spy_exit_archetype(result_row: dict[str, Any]) -> str:
+    """Describe the exit archetype in plain English for reporting."""
+    exit_name = str(result_row.get("exit_structure_name", "") or "")
+    exit_label = str(result_row.get("exit_preset_label", "") or "")
+    lower = f"{exit_name} {exit_label}".lower()
+    if "oco" in lower:
+        return "OCO bracket"
+    if "trailing" in lower and "stop loss plus trailing stop" in lower:
+        return "fixed stop plus trailing stop"
+    if "trailing" in lower:
+        return "trailing stop"
+    if "take profit" in lower:
+        return "fixed take profit"
+    if "fixed stop" in lower or "stop loss" in lower:
+        return "fixed stop loss"
+    if "time stop" in lower:
+        return "time stop"
+    return "signal exit"
+
+
 def build_spy_search_summary_comment(result_row: dict[str, Any]) -> str:
     """Summarize one automated SPY search result in plain English."""
     trades = int(result_row.get("number_of_trades", 0) or 0)
@@ -781,17 +866,19 @@ def build_spy_search_summary_comment(result_row: dict[str, Any]) -> str:
     drawdown_improvement = float(result_row.get("drawdown_improvement", 0.0) or 0.0)
     experimental = bool(result_row.get("experimental", False))
     timeframe = str(result_row.get("timeframe", "1d"))
+    archetype = describe_spy_search_archetype(result_row)
+    exit_archetype = describe_spy_exit_archetype(result_row)
     if timeframe in {"15m", "5m"} and trades < 10:
-        return "This intraday result uses a much shorter yfinance history window and still has too few trades to trust."
+        return f"This {archetype} with {exit_archetype} uses short intraday history and still has too few trades to trust."
     if trades < 5:
-        return "This result has strong-looking performance but too few trades to trust."
+        return f"This {archetype} with {exit_archetype} has strong-looking performance but too few trades to trust."
     if excess_cagr > 0 and drawdown_improvement > 0:
-        return "This result beat SPY with lower drawdown and sufficient trade count."
+        return f"This {archetype} with {exit_archetype} beat SPY with lower drawdown and sufficient trade count."
     if drawdown_improvement > 0 and excess_cagr <= 0:
-        return "This result reduced drawdown but underperformed buy-and-hold SPY."
+        return f"This {archetype} with {exit_archetype} reduced drawdown but underperformed buy-and-hold SPY."
     if experimental:
-        return "This result is experimental because QQE/HMA has more parameters and needs extra caution."
-    return "This result is simple, but it did not clearly improve on buy-and-hold SPY."
+        return f"This {archetype} with {exit_archetype} is experimental and needs extra caution."
+    return f"This {archetype} with {exit_archetype} is simple, but it did not clearly improve on buy-and-hold SPY."
 
 
 def grade_spy_search_candidate(result_row: dict[str, Any]) -> tuple[str, int]:
@@ -940,11 +1027,23 @@ def run_automated_spy_search(
             "entry_parameters_json": combination.entry_preset.parameters,
             "entry_preset_id": combination.entry_preset.preset_id,
             "entry_preset_label": combination.entry_preset.label,
+            "strategy_archetype": describe_spy_search_archetype(
+                {
+                    "entry_strategy_name": combination.entry_preset.entry_strategy_name,
+                    "entry_preset_label": combination.entry_preset.label,
+                }
+            ),
             "exit_structure_key": combination.exit_preset.exit_structure_key,
             "exit_structure_name": combination.exit_preset.exit_structure_name,
             "exit_parameters_json": combination.exit_preset.parameters,
             "exit_preset_id": combination.exit_preset.exit_preset_id,
             "exit_preset_label": combination.exit_preset.label,
+            "exit_archetype": describe_spy_exit_archetype(
+                {
+                    "exit_structure_name": combination.exit_preset.exit_structure_name,
+                    "exit_preset_label": combination.exit_preset.label,
+                }
+            ),
             "backtest_run_id": result.run_id if persist_backtest_runs else None,
             "total_return": float(result.metrics.get("Total Return", 0.0) or 0.0),
             "cagr": float(result.metrics.get("CAGR", 0.0) or 0.0),

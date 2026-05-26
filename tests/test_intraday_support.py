@@ -7,6 +7,7 @@ import pandas as pd
 
 from trading_lab.backtest.engine import BacktestConfig, BacktestEngine
 from trading_lab.data.database import TradingLabDatabase
+from trading_lab.indicators.intraday_signals import build_opening_range_frame, build_volume_pressure_frame
 from trading_lab.paper.forward_engine import ForwardPaperEngine, build_active_paper_strategy_payload
 from trading_lab.spy_lab import build_spy_backtest_config, build_spy_strategy, build_spy_workbench_config, prepare_spy_timeframe_bars
 
@@ -173,3 +174,53 @@ def test_intraday_forward_skip_on_missing_data_warning():
     )
     result = ForwardPaperEngine().run_update(active_strategy=payload, provider=provider)
     assert result.skipped is True
+
+
+def test_opening_range_and_volume_pressure_helpers():
+    intraday = make_intraday_bars("15m")
+    opening_range = build_opening_range_frame(intraday, breakout_buffer_pct=0.0005, max_or_width_pct=0.02)
+    pressure = build_volume_pressure_frame(intraday, pressure_length=3)
+    assert {"or_high", "or_low", "or_breakout", "avoid_long_after_or_breakdown"} <= set(opening_range.columns)
+    assert {"pressure_z", "pressure_score", "bullish_pressure"} <= set(pressure.columns)
+    assert opening_range["or_breakout"].dtype == bool
+
+
+def test_opening_range_breakout_strategy_generates_intraday_entry():
+    intraday = make_intraday_bars("15m")
+    daily = make_daily_regime_bars()
+    prepared = prepare_spy_timeframe_bars(primary_bars=intraday, timeframe="15m", daily_bars=daily)
+    strategy = build_spy_strategy(
+        "opening_range_breakout",
+        {
+            "breakout_buffer_pct": 0.0005,
+            "max_or_width_pct": 0.02,
+            "max_entry_time": "11:30",
+            "require_daily_regime": True,
+            "use_volume_pressure": False,
+            "qqe_state_mode": "off",
+            "use_swingarm_exit": False,
+            "end_of_day_exit": True,
+            "allow_overnight": False,
+        },
+    )
+    signals = strategy.generate_signals(prepared)
+    assert {"or_high", "pressure_z", "entry_signal", "exit_signal"} <= set(signals.columns)
+    assert signals["entry_signal"].any()
+
+
+def test_intraday_qqe_hma_strategy_generates_state_columns():
+    intraday = make_intraday_bars("15m")
+    daily = make_daily_regime_bars()
+    prepared = prepare_spy_timeframe_bars(primary_bars=intraday, timeframe="15m", daily_bars=daily)
+    strategy = build_spy_strategy("intraday_qqe_hma")
+    signals = strategy.generate_signals(prepared)
+    assert {"qqe_long_state", "qqe_short_state", "qqe_neutral_state", "hma", "long_arm"} <= set(signals.columns)
+
+
+def test_swingarm_trend_strategy_columns_present():
+    intraday = make_intraday_bars("15m")
+    daily = make_daily_regime_bars()
+    prepared = prepare_spy_timeframe_bars(primary_bars=intraday, timeframe="15m", daily_bars=daily)
+    strategy = build_spy_strategy("swingarm_trend")
+    signals = strategy.generate_signals(prepared)
+    assert {"long_arm", "short_arm", "entry_signal", "exit_signal"} <= set(signals.columns)
